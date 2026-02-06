@@ -23,6 +23,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
+import android.os.VibratorManager;
 import android.util.Log;
 import android.widget.Toast;
 
@@ -63,6 +64,7 @@ public class BridgeServer {
 
     public void start() {
         running = true;
+        prewarmSensors();
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -79,6 +81,29 @@ public class BridgeServer {
                 }
             }
         }, "bridge-server").start();
+    }
+
+    private void prewarmSensors() {
+        int[] types = {
+            Sensor.TYPE_ACCELEROMETER,
+            Sensor.TYPE_GYROSCOPE,
+            Sensor.TYPE_LIGHT
+        };
+        for (final int type : types) {
+            Sensor sensor = sensorManager.getDefaultSensor(type);
+            if (sensor == null) continue;
+            SensorEventListener listener = new SensorEventListener() {
+                @Override
+                public void onSensorChanged(SensorEvent event) {
+                    sensorData.put(type, event.values.clone());
+                }
+                @Override
+                public void onAccuracyChanged(Sensor s, int accuracy) {}
+            };
+            sensorManager.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_UI, mainHandler);
+            sensorListeners.put(type, listener);
+        }
+        Log.i(TAG, "Pre-warmed " + sensorListeners.size() + " sensors");
     }
 
     public void stop() {
@@ -146,6 +171,9 @@ public class BridgeServer {
                 case "memory_info":    result = cmdMemoryInfo(); break;
                 case "screen_brightness": result = cmdScreenBrightness(); break;
                 case "notify":         result = cmdNotify(args); break;
+                case "services":       result = cmdServices(); break;
+                case "features":       result = cmdFeatures(); break;
+                case "shell":          result = cmdShell(args); break;
                 case "ping":           result = "\"pong\""; break;
                 default:
                     return "{\"id\":" + id + ",\"ok\":false,\"error\":\"unknown command: " + cmd + "\"}";
@@ -193,14 +221,24 @@ public class BridgeServer {
             + ",\"status\":" + status + "}";
     }
 
+    @SuppressWarnings("deprecation")
     private String cmdVibrate(String args) {
         int ms = parseInt(args, 200);
         Vibrator v = (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
-        if (v != null && v.hasVibrator()) {
-            v.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE));
+        if (v == null) return "\"no vibrator\"";
+        try {
+            /* Use AudioAttributes with USAGE_ALARM — routes through audio/haptic pipeline
+               which works on ROMs where the standard vibrator HAL is absent */
+            v.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE),
+                new android.media.AudioAttributes.Builder()
+                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .setUsage(android.media.AudioAttributes.USAGE_ALARM)
+                    .build());
             return "\"ok\"";
+        } catch (Exception e) {
+            Log.w(TAG, "Vibrate failed", e);
+            return "\"error: " + escJson(e.getMessage()) + "\"";
         }
-        return "\"no vibrator\"";
     }
 
     private String cmdToast(String args) {
@@ -286,7 +324,7 @@ public class BridgeServer {
             @Override
             public void onAccuracyChanged(Sensor s, int accuracy) {}
         };
-        sensorManager.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_UI);
+        sensorManager.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_UI, mainHandler);
         sensorListeners.put(type, listener);
         return "\"ok\"";
     }
@@ -435,6 +473,65 @@ public class BridgeServer {
             .build();
         nm.notify((int) System.currentTimeMillis(), notif);
         return "\"ok\"";
+    }
+
+    /* ---- Introspection ---- */
+
+    private String cmdServices() {
+        try {
+            @SuppressWarnings("rawtypes")
+            Class smClass = Class.forName("android.os.ServiceManager");
+            String[] services = (String[]) smClass.getMethod("listServices").invoke(null);
+            if (services == null) return "[]";
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < services.length; i++) {
+                if (i > 0) sb.append(",");
+                sb.append("\"").append(escJson(services[i])).append("\"");
+            }
+            sb.append("]");
+            return sb.toString();
+        } catch (Exception e) {
+            return "{\"error\":\"" + escJson(e.getMessage()) + "\"}";
+        }
+    }
+
+    private String cmdFeatures() {
+        PackageManager pm = context.getPackageManager();
+        android.content.pm.FeatureInfo[] features = pm.getSystemAvailableFeatures();
+        if (features == null) return "[]";
+        StringBuilder sb = new StringBuilder("[");
+        int count = 0;
+        for (android.content.pm.FeatureInfo fi : features) {
+            if (fi.name == null) continue;
+            if (count > 0) sb.append(",");
+            sb.append("{\"name\":\"").append(escJson(fi.name)).append("\"")
+              .append(",\"version\":").append(fi.version).append("}");
+            count++;
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+
+    private String cmdShell(String args) {
+        String cmd = unquote(args);
+        if (cmd.isEmpty()) return "{\"error\":\"usage: shell <command>\"}";
+        try {
+            Process p = Runtime.getRuntime().exec(new String[]{"/system/bin/sh", "-c", cmd});
+            java.io.InputStream is = p.getInputStream();
+            java.io.InputStream es = p.getErrorStream();
+            byte[] buf = new byte[8192];
+            StringBuilder out = new StringBuilder();
+            int n;
+            while ((n = is.read(buf)) > 0) out.append(new String(buf, 0, n));
+            StringBuilder err = new StringBuilder();
+            while ((n = es.read(buf)) > 0) err.append(new String(buf, 0, n));
+            int exitCode = p.waitFor();
+            return "{\"exit\":" + exitCode
+                + ",\"stdout\":\"" + escJson(out.toString()) + "\""
+                + ",\"stderr\":\"" + escJson(err.toString()) + "\"}";
+        } catch (Exception e) {
+            return "{\"error\":\"" + escJson(e.getMessage()) + "\"}";
+        }
     }
 
     /* ---- Helpers ---- */

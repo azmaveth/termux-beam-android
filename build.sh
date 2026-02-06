@@ -1,29 +1,32 @@
 #!/bin/bash
-# Build the BEAM Runner APK from Termux
-# Run setup.sh and prepare_assets.sh first
+# Build BeamApp APK in Termux
+# Usage: bash build.sh
 set -e
 
 PROJECT="$(cd "$(dirname "$0")" && pwd)"
-ANDROID_JAR="$HOME/android-sdk/android.jar"
 BUILD="$PROJECT/build"
 GEN="$BUILD/gen"
 OBJ="$BUILD/obj"
 APK_DIR="$BUILD/apk"
 COMPILED_RES="$BUILD/compiled_res"
 
+# Auto-detect android.jar location
+if [ -z "$ANDROID_JAR" ]; then
+    ANDROID_JAR="$(find "$HOME" -name android.jar -path "*/android-*/android.jar" 2>/dev/null | head -1)"
+fi
 if [ ! -f "$ANDROID_JAR" ]; then
-    echo "ERROR: android.jar not found. Run setup.sh first."
+    echo "ERROR: android.jar not found. Set ANDROID_JAR or run setup.sh first."
     exit 1
 fi
 
-if [ ! -d "$BUILD/lib/arm64-v8a" ]; then
-    echo "ERROR: Native libs not found. Run prepare_assets.sh first."
-    exit 1
-fi
-
-if [ ! -d "$PROJECT/assets/erlang" ]; then
-    echo "ERROR: Erlang assets not found. Run prepare_assets.sh first."
-    exit 1
+# Keystore
+KEYSTORE="${KEYSTORE:-$HOME/.debug.keystore}"
+if [ ! -f "$KEYSTORE" ]; then
+    echo "Creating debug keystore..."
+    keytool -genkeypair -keystore "$KEYSTORE" -alias debug \
+        -keyalg RSA -keysize 2048 -validity 10000 \
+        -storepass android -keypass android \
+        -dname "CN=Debug,O=Debug,C=US"
 fi
 
 echo "=== Cleaning build artifacts ==="
@@ -48,9 +51,7 @@ javac \
     -classpath "$ANDROID_JAR" \
     -d "$OBJ" \
     "$GEN/com/example/beamapp/R.java" \
-    "$PROJECT/src/com/example/beamapp/BridgeServer.java" \
-    "$PROJECT/src/com/example/beamapp/BeamService.java" \
-    "$PROJECT/src/com/example/beamapp/MainActivity.java"
+    "$PROJECT/src/com/example/beamapp/"*.java
 
 echo "=== Step 4: DEX ==="
 dx --dex --output="$BUILD/classes.dex" "$OBJ"
@@ -58,9 +59,7 @@ dx --dex --output="$BUILD/classes.dex" "$OBJ"
 echo "=== Step 5: Package APK ==="
 cp "$APK_DIR/beamapp-unsigned.apk" "$APK_DIR/beamapp-tmp.apk"
 cd "$BUILD"
-# Add DEX
 zip -j "$APK_DIR/beamapp-tmp.apk" classes.dex
-# Add native libraries UNCOMPRESSED (-0) — required by Android
 zip -0 "$APK_DIR/beamapp-tmp.apk" lib/arm64-v8a/*.so
 cd "$PROJECT"
 
@@ -68,27 +67,18 @@ echo "=== Step 6: Zipalign ==="
 zipalign -f 4 "$APK_DIR/beamapp-tmp.apk" "$APK_DIR/beamapp.apk"
 
 echo "=== Step 7: Sign ==="
-if [ ! -f "$HOME/.debug.keystore" ]; then
-    keytool -genkeypair \
-        -keystore "$HOME/.debug.keystore" \
-        -alias debug \
-        -keyalg RSA -keysize 2048 \
-        -validity 10000 \
-        -storepass android \
-        -keypass android \
-        -dname "CN=Debug, OU=Debug, O=Debug, L=Debug, ST=Debug, C=US"
-fi
-
 apksigner sign \
-    --ks "$HOME/.debug.keystore" \
+    --ks "$KEYSTORE" \
     --ks-key-alias debug \
     --ks-pass pass:android \
     --key-pass pass:android \
     "$APK_DIR/beamapp.apk"
 
+# Copy to /sdcard for easy install
+cp "$APK_DIR/beamapp.apk" /sdcard/beamapp.apk 2>/dev/null || true
+
 echo ""
 echo "=== BUILD SUCCESSFUL ==="
 ls -lh "$APK_DIR/beamapp.apk"
 echo ""
-echo "To install:"
-echo "  cp $APK_DIR/beamapp.apk ~/storage/shared/ && termux-open ~/storage/shared/beamapp.apk"
+echo "Install: termux-open $APK_DIR/beamapp.apk"

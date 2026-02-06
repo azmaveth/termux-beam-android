@@ -137,7 +137,8 @@ public class BeamService extends Service {
                         "io:format(\"Commands: device battery vibrate toast ping,~n\"), " +
                         "io:format(\"  sensors accel gyro light wifi network memory,~n\"), " +
                         "io:format(\"  notify <t> <b>, clipboard, copy <text>,~n\"), " +
-                        "io:format(\"  packages, brightness, procs~n~n\"), " +
+                        "io:format(\"  packages, brightness, procs, prop <name>,~n\"), " +
+                        "io:format(\"  services, features, shell <cmd>~n~n\"), " +
 
                         /* Start command TCP server on 9876 for interactive use */
                         "CmdPort = 9876, " +
@@ -187,10 +188,14 @@ public class BeamService extends Service {
                         "          <<\"clipboard\">> -> android:clipboard_get(); " +
                         "          <<\"copy \", Text/binary>> -> android:clipboard_set(Text); " +
                         "          <<\"prop \", Prop/binary>> -> android:system_prop(Prop); " +
+                        "          <<\"services\">> -> android:call(<<\"services\">>); " +
+                        "          <<\"features\">> -> android:call(<<\"features\">>); " +
+                        "          <<\"shell \", ShCmd/binary>> -> android:call(<<\"shell\">>, ShCmd); " +
                         "          _ -> {ok, <<\"Unknown: \", Cmd/binary, " +
                         "            \". Try: device battery memory wifi sensors accel \" " +
                         "            \"gyro light vibrate toast <msg> notify <t> <b> \" " +
-                        "            \"clipboard copy <text> packages brightness ping\">>} " +
+                        "            \"clipboard copy <text> packages brightness ping \" " +
+                        "            \"services features shell <cmd> prop <name>\">>} " +
                         "        end " +
                         "      catch E:R -> {error, list_to_binary(io_lib:format(\"~p:~p\", [E,R]))} " +
                         "      end, " +

@@ -7,6 +7,8 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.view.View;
@@ -20,6 +22,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.util.ArrayList;
 
 public class MainActivity extends Activity {
     private BeamService beamService;
@@ -68,6 +71,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        requestPermissions();
 
         statusText = findViewById(R.id.status_text);
         logText = findViewById(R.id.log_text);
@@ -157,6 +161,32 @@ public class MainActivity extends Activity {
         /* Start and bind to the service */
         Intent serviceIntent = new Intent(this, BeamService.class);
         bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE);
+    }
+
+    private void requestPermissions() {
+        ArrayList<String> needed = new ArrayList<>();
+
+        /* Location (runtime permission) */
+        if (checkSelfPermission("android.permission.ACCESS_FINE_LOCATION")
+                != PackageManager.PERMISSION_GRANTED) {
+            needed.add("android.permission.ACCESS_FINE_LOCATION");
+        }
+        if (checkSelfPermission("android.permission.ACCESS_COARSE_LOCATION")
+                != PackageManager.PERMISSION_GRANTED) {
+            needed.add("android.permission.ACCESS_COARSE_LOCATION");
+        }
+
+        /* Notifications (runtime on Android 13+) */
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                    != PackageManager.PERMISSION_GRANTED) {
+                needed.add("android.permission.POST_NOTIFICATIONS");
+            }
+        }
+
+        if (!needed.isEmpty()) {
+            requestPermissions(needed.toArray(new String[0]), 1);
+        }
     }
 
     private void updateStatus(boolean running) {

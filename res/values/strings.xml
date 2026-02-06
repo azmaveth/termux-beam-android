@@ -12,5 +12,5 @@
     <string name="notif_title">BEAM VM Running</string>
     <string name="notif_text">Erlang/OTP is active</string>
     <string name="copy_log">Copy Log</string>
-    <string name="commands_ref">device  battery  memory  wifi  network\nsensors  accel  gyro  light  brightness\nvibrate  toast &lt;msg&gt;  ping  procs\nnotify &lt;title&gt; &lt;body&gt;  packages\nclipboard  copy &lt;text&gt;  prop &lt;name&gt;</string>
+    <string name="commands_ref">device  battery  memory  wifi  network\nsensors  accel  gyro  light  brightness\nvibrate  toast &lt;msg&gt;  ping  procs\nnotify &lt;title&gt; &lt;body&gt;  packages\nclipboard  copy &lt;text&gt;  prop &lt;name&gt;\nservices  features  shell &lt;cmd&gt;</string>
 </resources>
