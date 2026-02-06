@@ -1,0 +1,381 @@
+package com.example.beamapp;
+
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.app.Service;
+import android.content.Intent;
+import android.content.res.AssetManager;
+import android.os.Binder;
+import android.os.Handler;
+import android.os.IBinder;
+import android.os.Looper;
+import android.util.Log;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.util.Map;
+
+public class BeamService extends Service {
+    private static final String TAG = "BeamService";
+    private static final String CHANNEL_ID = "beam_service_channel";
+    private static final int NOTIFICATION_ID = 1;
+
+    private final IBinder binder = new LocalBinder();
+    private Handler handler;
+    private OutputCallback outputCallback;
+    private Process beamProcess;
+    private OutputStream beamStdin;
+    private volatile boolean isBeamRunning = false;
+    private BridgeServer bridgeServer;
+
+    public interface OutputCallback {
+        void onOutput(String text);
+        void onStatusChanged(boolean running);
+    }
+
+    public class LocalBinder extends Binder {
+        BeamService getService() {
+            return BeamService.this;
+        }
+    }
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        handler = new Handler(Looper.getMainLooper());
+        createNotificationChannel();
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        startForeground(NOTIFICATION_ID, buildNotification());
+        return START_STICKY;
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        return binder;
+    }
+
+    public void setOutputCallback(OutputCallback callback) {
+        this.outputCallback = callback;
+    }
+
+    public void startBeam() {
+        if (isBeamRunning) return;
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    appendOutput("Preparing BEAM runtime...\n");
+
+                    /* Extract OTP assets (always re-extract to pick up changes) */
+                    File erlRoot = new File(getFilesDir(), "erlang");
+                    appendOutput("Extracting OTP files...\n");
+                    extractAssets("erlang", erlRoot);
+                    appendOutput("Extraction complete.\n");
+
+                    /* Start the Android bridge server */
+                    if (bridgeServer != null) bridgeServer.stop();
+                    bridgeServer = new BridgeServer(BeamService.this);
+                    bridgeServer.start();
+                    appendOutput("Bridge server started on port " + BridgeServer.PORT + "\n");
+
+                    /* Set up symlinks for shared libraries */
+                    String nativeLibDir = getApplicationInfo().nativeLibraryDir;
+                    File libDir = new File(getFilesDir(), "lib");
+                    libDir.mkdirs();
+                    createSymlink(nativeLibDir + "/libncursesw_compat.so",
+                                  libDir + "/libncursesw.so.6");
+                    createSymlink(nativeLibDir + "/libz_compat.so",
+                                  libDir + "/libz.so.1");
+                    createSymlink(nativeLibDir + "/libc++_shared.so",
+                                  libDir + "/libc++_shared.so");
+
+                    /* Set up ERTS bin dir with proper names */
+                    File ertsBin = new File(getFilesDir(), "erts/bin");
+                    ertsBin.mkdirs();
+                    createSymlink(nativeLibDir + "/libbeam_vm.so",
+                                  ertsBin + "/beam.smp");
+                    createSymlink(nativeLibDir + "/liberl_child_setup.so",
+                                  ertsBin + "/erl_child_setup");
+                    createSymlink(nativeLibDir + "/libinet_gethost.so",
+                                  ertsBin + "/inet_gethost");
+
+                    String beamPath = nativeLibDir + "/libbeam_vm.so";
+                    String rootDir = erlRoot.getAbsolutePath();
+                    String binDir = ertsBin.getAbsolutePath();
+
+                    /* Erlang boot: start android bridge, then command server */
+                    String evalCode =
+                        "io:format(\"~n=== BEAM VM Started ===~n\"), " +
+                        "io:format(\"OTP Release: ~s~n\", [erlang:system_info(otp_release)]), " +
+                        "io:format(\"ERTS Version: ~s~n\", [erlang:system_info(version)]), " +
+                        "io:format(\"Schedulers: ~p~n\", [erlang:system_info(schedulers)]), " +
+
+                        /* Start android bridge */
+                        "timer:sleep(500), " +
+                        "io:format(\"~nConnecting to Android bridge...\"), " +
+                        "{ok, _} = android:start_link(), " +
+                        "io:format(\" connected!~n\"), " +
+
+                        /* Query device info */
+                        "{ok, DevInfo} = android:device_info(), " +
+                        "io:format(\"Device: ~s~n\", [DevInfo]), " +
+                        "{ok, Batt} = android:battery(), " +
+                        "io:format(\"Battery: ~s~n\", [Batt]), " +
+
+                        "io:format(\"~n--- Android Bridge Ready ---~n\"), " +
+                        "io:format(\"Commands: device battery vibrate toast ping,~n\"), " +
+                        "io:format(\"  sensors accel gyro light wifi network memory,~n\"), " +
+                        "io:format(\"  notify <t> <b>, clipboard, copy <text>,~n\"), " +
+                        "io:format(\"  packages, brightness, procs~n~n\"), " +
+
+                        /* Start command TCP server on 9876 for interactive use */
+                        "CmdPort = 9876, " +
+                        "{ok, LSock} = gen_tcp:listen(CmdPort, " +
+                        "  [binary, {active, false}, {reuseaddr, true}, {packet, 0}]), " +
+                        "io:format(\"Command server on port ~p. Send commands!~n~n\", [CmdPort]), " +
+
+                        "HandleCmd = fun HandleC(S) -> " +
+                        "  case gen_tcp:recv(S, 0, 60000) of " +
+                        "    {ok, Data} -> " +
+                        "      Cmd = string:trim(Data), " +
+                        "      io:format(\"> ~s~n\", [Cmd]), " +
+                        "      Result = try " +
+                        "        case Cmd of " +
+                        "          <<\"device\">> -> android:device_info(); " +
+                        "          <<\"battery\">> -> android:battery(); " +
+                        "          <<\"memory\">> -> android:memory_info(); " +
+                        "          <<\"wifi\">> -> android:wifi_info(); " +
+                        "          <<\"network\">> -> android:network_info(); " +
+                        "          <<\"location\">> -> android:location(); " +
+                        "          <<\"sensors\">> -> android:sensors(); " +
+                        "          <<\"brightness\">> -> android:screen_brightness(); " +
+                        "          <<\"packages\">> -> android:packages(); " +
+                        "          <<\"ping\">> -> android:ping(); " +
+                        "          <<\"vibrate\">> -> android:vibrate(200); " +
+                        "          <<\"accel\">> -> " +
+                        "            android:sensor_start(accelerometer), " +
+                        "            timer:sleep(200), " +
+                        "            android:sensor_read(accelerometer); " +
+                        "          <<\"gyro\">> -> " +
+                        "            android:sensor_start(gyroscope), " +
+                        "            timer:sleep(200), " +
+                        "            android:sensor_read(gyroscope); " +
+                        "          <<\"light\">> -> " +
+                        "            android:sensor_start(light), " +
+                        "            timer:sleep(200), " +
+                        "            android:sensor_read(light); " +
+                        "          <<\"procs\">> -> " +
+                        "            {ok, list_to_binary(io_lib:format(\"~p\", " +
+                        "              [erlang:system_info(process_count)]))}; " +
+                        "          <<\"toast \", Msg/binary>> -> android:toast(Msg); " +
+                        "          <<\"notify \", Rest/binary>> -> " +
+                        "            case binary:split(Rest, <<\" \">>) of " +
+                        "              [T, B] -> android:notify(T, B); " +
+                        "              [T] -> android:notify(T, <<>>) " +
+                        "            end; " +
+                        "          <<\"clipboard\">> -> android:clipboard_get(); " +
+                        "          <<\"copy \", Text/binary>> -> android:clipboard_set(Text); " +
+                        "          <<\"prop \", Prop/binary>> -> android:system_prop(Prop); " +
+                        "          _ -> {ok, <<\"Unknown: \", Cmd/binary, " +
+                        "            \". Try: device battery memory wifi sensors accel \" " +
+                        "            \"gyro light vibrate toast <msg> notify <t> <b> \" " +
+                        "            \"clipboard copy <text> packages brightness ping\">>} " +
+                        "        end " +
+                        "      catch E:R -> {error, list_to_binary(io_lib:format(\"~p:~p\", [E,R]))} " +
+                        "      end, " +
+                        "      Resp = case Result of " +
+                        "        {ok, V} -> <<V/binary, \"\\n\">>; " +
+                        "        {error, Err} -> <<\"ERROR: \", Err/binary, \"\\n\">> " +
+                        "      end, " +
+                        "      io:format(\"  ~s\", [Resp]), " +
+                        "      gen_tcp:send(S, Resp), " +
+                        "      HandleC(S); " +
+                        "    {error, timeout} -> HandleC(S); " +
+                        "    {error, closed} -> " +
+                        "      io:format(\"Client disconnected~n\"), ok " +
+                        "  end " +
+                        "end, " +
+                        "AcceptLoop = fun Loop() -> " +
+                        "  case gen_tcp:accept(LSock) of " +
+                        "    {ok, Sock} -> " +
+                        "      io:format(\"Client connected~n\"), " +
+                        "      spawn(fun() -> HandleCmd(Sock) end), " +
+                        "      Loop(); " +
+                        "    {error, _} -> ok " +
+                        "  end " +
+                        "end, " +
+                        "AcceptLoop().";
+
+                    appendOutput("Launching beam.smp...\n");
+                    appendOutput("  Root: " + rootDir + "\n");
+                    appendOutput("  Bin:  " + binDir + "\n\n");
+
+                    /* Path to our android.beam module */
+                    String androidEbin = erlRoot.getAbsolutePath() + "/lib/android/ebin";
+
+                    ProcessBuilder pb = new ProcessBuilder(
+                        beamPath,
+                        "--", "-root", rootDir,
+                        "-bindir", binDir,
+                        "-boot", "start_clean",
+                        "-noshell",
+                        "-pa", androidEbin,
+                        "-eval", evalCode
+                    );
+
+                    Map<String, String> env = pb.environment();
+                    env.put("HOME", getFilesDir().getAbsolutePath());
+                    env.put("TERM", "dumb");
+                    env.put("EMU", "beam");
+                    env.put("ROOTDIR", rootDir);
+                    env.put("BINDIR", binDir);
+                    env.put("PROGNAME", "erl");
+                    /* LD_LIBRARY_PATH: our symlink dir + native lib dir + system */
+                    env.put("LD_LIBRARY_PATH",
+                        libDir + ":" + nativeLibDir + ":/system/lib64");
+
+                    pb.redirectErrorStream(true);
+                    beamProcess = pb.start();
+                    beamStdin = beamProcess.getOutputStream();
+                    isBeamRunning = true;
+                    notifyStatus(true);
+
+                    /* Read stdout in this thread */
+                    BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(beamProcess.getInputStream()));
+                    char[] buf = new char[4096];
+                    int n;
+                    while ((n = reader.read(buf)) != -1) {
+                        final String text = new String(buf, 0, n);
+                        appendOutput(text);
+                    }
+
+                    /* Process exited */
+                    int exitCode = beamProcess.waitFor();
+                    isBeamRunning = false;
+                    appendOutput("\nBEAM exited (code: " + exitCode + ")\n");
+                    notifyStatus(false);
+
+                } catch (Exception e) {
+                    isBeamRunning = false;
+                    appendOutput("\nError: " + e.getMessage() + "\n");
+                    Log.e(TAG, "BEAM launch failed", e);
+                    notifyStatus(false);
+                }
+            }
+        }).start();
+    }
+
+    public void stopBeam() {
+        if (bridgeServer != null) {
+            bridgeServer.stop();
+            bridgeServer = null;
+        }
+        if (beamProcess != null) {
+            beamProcess.destroy();
+            isBeamRunning = false;
+            notifyStatus(false);
+            appendOutput("BEAM stopped by user.\n");
+        }
+    }
+
+    public boolean isBeamRunning() {
+        return isBeamRunning;
+    }
+
+    private void createSymlink(String target, String link) {
+        try {
+            File linkFile = new File(link);
+            if (linkFile.exists()) linkFile.delete();
+            Runtime.getRuntime().exec(new String[]{
+                "ln", "-sf", target, link
+            }).waitFor();
+        } catch (Exception e) {
+            Log.w(TAG, "Symlink failed: " + target + " -> " + link, e);
+        }
+    }
+
+    private void extractAssets(String assetPath, File destDir) throws IOException {
+        AssetManager am = getAssets();
+        String[] children = am.list(assetPath);
+        if (children == null || children.length == 0) {
+            /* It's a file, copy it */
+            destDir.getParentFile().mkdirs();
+            InputStream in = am.open(assetPath);
+            FileOutputStream out = new FileOutputStream(destDir);
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            out.close();
+            in.close();
+        } else {
+            /* It's a directory, recurse */
+            destDir.mkdirs();
+            for (String child : children) {
+                extractAssets(assetPath + "/" + child,
+                              new File(destDir, child));
+            }
+        }
+    }
+
+    private void appendOutput(final String text) {
+        if (outputCallback != null) {
+            handler.post(new Runnable() {
+                @Override
+                public void run() {
+                    outputCallback.onOutput(text);
+                }
+            });
+        }
+    }
+
+    private void notifyStatus(final boolean running) {
+        if (outputCallback != null) {
+            handler.post(new Runnable() {
+                @Override
+                public void run() {
+                    outputCallback.onStatusChanged(running);
+                }
+            });
+        }
+    }
+
+    private void createNotificationChannel() {
+        NotificationChannel channel = new NotificationChannel(
+            CHANNEL_ID,
+            getString(R.string.channel_name),
+            NotificationManager.IMPORTANCE_LOW);
+        channel.setDescription(getString(R.string.channel_desc));
+        getSystemService(NotificationManager.class).createNotificationChannel(channel);
+    }
+
+    private Notification buildNotification() {
+        Intent intent = new Intent(this, MainActivity.class);
+        PendingIntent pi = PendingIntent.getActivity(this, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        return new Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle(getString(R.string.notif_title))
+            .setContentText(getString(R.string.notif_text))
+            .setSmallIcon(android.R.drawable.ic_menu_manage)
+            .setContentIntent(pi)
+            .setOngoing(true)
+            .build();
+    }
+
+    @Override
+    public void onDestroy() {
+        stopBeam();
+        super.onDestroy();
+    }
+}

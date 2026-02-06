@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BEAM Runner</string>
+    <string name="beam_status">BEAM VM Status</string>
+    <string name="start_beam">Start BEAM</string>
+    <string name="stop_beam">Stop BEAM</string>
+    <string name="send">Send</string>
+    <string name="hint_message">Type a message...</string>
+    <string name="log_label">BEAM Output:</string>
+    <string name="channel_name">BEAM Service</string>
+    <string name="channel_desc">Keeps the BEAM VM running</string>
+    <string name="notif_title">BEAM VM Running</string>
+    <string name="notif_text">Erlang/OTP is active</string>
+    <string name="copy_log">Copy Log</string>
+    <string name="commands_ref">device  battery  memory  wifi  network\nsensors  accel  gyro  light  brightness\nvibrate  toast &lt;msg&gt;  ping  procs\nnotify &lt;title&gt; &lt;body&gt;  packages\nclipboard  copy &lt;text&gt;  prop &lt;name&gt;</string>
+</resources>
