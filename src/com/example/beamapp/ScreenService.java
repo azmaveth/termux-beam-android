@@ -2,6 +2,8 @@ package com.example.beamapp;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Path;
 import android.graphics.Rect;
@@ -132,6 +134,12 @@ public class ScreenService extends AccessibilityService {
                 case "globalAction": return globalAction(args);
                 case "screenshot":   return screenshot(args);
                 case "getInfo":      return getInfo();
+                case "sendKey":      return sendKey(args);
+                case "longClick":    return longClick(args);
+                case "scroll":       return scroll(args);
+                case "waitFor":      return waitFor(args);
+                case "launch":       return launch(args);
+                case "nodeInfo":     return nodeInfo(args);
                 case "ping":         return "{\"pong\":true}";
                 default:             return "{\"error\":\"unknown: " + esc(method) + "\"}";
             }
@@ -595,6 +603,473 @@ public class ScreenService extends AccessibilityService {
         sb.append(",\"screenshot\":").append(Build.VERSION.SDK_INT >= 30);
         sb.append("}");
         return sb.toString();
+    }
+
+    /* ---- Send key ---- */
+
+    private String sendKey(String args) {
+        if (args == null || args.isEmpty()) {
+            return "{\"error\":\"usage: <key> — keys: enter, backspace, delete, tab, escape, up, down, left, right, home, end\"}";
+        }
+        String key = args.trim().toLowerCase();
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+
+        switch (key) {
+            case "enter":
+            case "return": {
+                // Try IME enter on focused node (API 30+)
+                if (root != null) {
+                    AccessibilityNodeInfo focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+                    if (focused != null) {
+                        if (Build.VERSION.SDK_INT >= 30) {
+                            boolean ok = focused.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.getId());
+                            focused.recycle();
+                            root.recycle();
+                            if (ok) return "{\"key\":\"enter\",\"ok\":true}";
+                        }
+                        // Fallback: press enter via ACTION_CLICK on focused node
+                        boolean ok = focused.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                        focused.recycle();
+                        root.recycle();
+                        return ok ? "{\"key\":\"enter\",\"ok\":true}" : "{\"error\":\"enter failed\"}";
+                    }
+                    root.recycle();
+                }
+                return "{\"error\":\"no focused node\"}";
+            }
+            case "backspace":
+            case "delete": {
+                if (root != null) {
+                    AccessibilityNodeInfo focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+                    if (focused != null && focused.isEditable()) {
+                        CharSequence text = focused.getText();
+                        if (text != null && text.length() > 0) {
+                            String newText;
+                            if (key.equals("delete")) {
+                                // Delete char after cursor (just remove last for simplicity)
+                                newText = text.subSequence(0, text.length() - 1).toString();
+                            } else {
+                                newText = text.subSequence(0, text.length() - 1).toString();
+                            }
+                            Bundle b = new Bundle();
+                            b.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText);
+                            boolean ok = focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, b);
+                            focused.recycle();
+                            root.recycle();
+                            return ok ? "{\"key\":\"" + key + "\",\"ok\":true}" : "{\"error\":\"" + key + " failed\"}";
+                        }
+                        focused.recycle();
+                    }
+                    root.recycle();
+                }
+                return "{\"error\":\"no editable focused node\"}";
+            }
+            case "tab": {
+                // Move focus to next element
+                if (root != null) {
+                    AccessibilityNodeInfo focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+                    if (focused != null) {
+                        boolean ok = focused.performAction(AccessibilityNodeInfo.ACTION_NEXT_HTML_ELEMENT)
+                                || root.performAction(AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY);
+                        focused.recycle();
+                    }
+                    // Fallback: traverse to next focusable
+                    AccessibilityNodeInfo next = root.focusSearch(android.view.View.FOCUS_FORWARD);
+                    if (next != null) {
+                        boolean ok = next.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+                        next.recycle();
+                        root.recycle();
+                        return ok ? "{\"key\":\"tab\",\"ok\":true}" : "{\"error\":\"tab failed\"}";
+                    }
+                    root.recycle();
+                }
+                return "{\"error\":\"no next focusable element\"}";
+            }
+            case "escape":
+            case "esc": {
+                if (root != null) root.recycle();
+                boolean ok = performGlobalAction(GLOBAL_ACTION_BACK);
+                return ok ? "{\"key\":\"escape\",\"ok\":true}" : "{\"error\":\"escape failed\"}";
+            }
+            case "up":
+            case "down":
+            case "left":
+            case "right": {
+                if (root != null) {
+                    AccessibilityNodeInfo focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+                    if (focused != null) {
+                        Bundle b = new Bundle();
+                        b.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_MOVEMENT_GRANULARITY_INT,
+                                AccessibilityNodeInfo.MOVEMENT_GRANULARITY_CHARACTER);
+                        int action = (key.equals("right") || key.equals("down"))
+                                ? AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY
+                                : AccessibilityNodeInfo.ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY;
+                        // For up/down, use line granularity
+                        if (key.equals("up") || key.equals("down")) {
+                            b.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_MOVEMENT_GRANULARITY_INT,
+                                    AccessibilityNodeInfo.MOVEMENT_GRANULARITY_LINE);
+                        }
+                        boolean ok = focused.performAction(action, b);
+                        focused.recycle();
+                        root.recycle();
+                        return ok ? "{\"key\":\"" + key + "\",\"ok\":true}" : "{\"error\":\"" + key + " failed\"}";
+                    }
+                    root.recycle();
+                }
+                return "{\"error\":\"no focused node\"}";
+            }
+            case "home":
+            case "end": {
+                if (root != null) {
+                    AccessibilityNodeInfo focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+                    if (focused != null) {
+                        Bundle b = new Bundle();
+                        b.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_MOVEMENT_GRANULARITY_INT,
+                                AccessibilityNodeInfo.MOVEMENT_GRANULARITY_LINE);
+                        int action = key.equals("home")
+                                ? AccessibilityNodeInfo.ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY
+                                : AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY;
+                        // Move to line boundary
+                        boolean ok = focused.performAction(action, b);
+                        focused.recycle();
+                        root.recycle();
+                        return ok ? "{\"key\":\"" + key + "\",\"ok\":true}" : "{\"error\":\"" + key + " failed\"}";
+                    }
+                    root.recycle();
+                }
+                return "{\"error\":\"no focused node\"}";
+            }
+            default: {
+                if (root != null) root.recycle();
+                // For single printable chars, append to focused editable
+                if (key.length() == 1 || args.trim().length() == 1) {
+                    return appendText(args.trim());
+                }
+                return "{\"error\":\"unknown key: " + esc(key) + "\"}";
+            }
+        }
+    }
+
+    private String appendText(String ch) {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return "{\"error\":\"no active window\"}";
+        try {
+            AccessibilityNodeInfo focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+            if (focused != null && focused.isEditable()) {
+                CharSequence text = focused.getText();
+                String newText = (text != null ? text.toString() : "") + ch;
+                Bundle b = new Bundle();
+                b.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText);
+                boolean ok = focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, b);
+                focused.recycle();
+                return ok ? "{\"key\":\"" + esc(ch) + "\",\"ok\":true}" : "{\"error\":\"append failed\"}";
+            }
+            if (focused != null) focused.recycle();
+            return "{\"error\":\"no editable focused node\"}";
+        } finally {
+            root.recycle();
+        }
+    }
+
+    /* ---- Long click ---- */
+
+    private String longClick(String args) {
+        if (args == null || args.isEmpty()) {
+            return "{\"error\":\"usage: <text> or <x> <y>\"}";
+        }
+        String[] parts = args.trim().split("\\s+");
+        // If 2 numbers, treat as coordinates
+        if (parts.length >= 2) {
+            try {
+                float x = Float.parseFloat(parts[0]);
+                float y = Float.parseFloat(parts[1]);
+                // Long press = hold gesture for 600ms
+                boolean ok = tapAtSync(x, y, 600);
+                return ok ? "{\"long_clicked\":true,\"x\":" + (int)x + ",\"y\":" + (int)y + "}"
+                          : "{\"error\":\"long click gesture failed\"}";
+            } catch (NumberFormatException e) {
+                // Not coordinates, treat as text
+            }
+        }
+        // Find by text and long-click
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return "{\"error\":\"no active window\"}";
+        try {
+            java.util.List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(args.trim());
+            if (nodes.isEmpty()) {
+                return "{\"error\":\"not found: " + esc(args.trim()) + "\"}";
+            }
+            AccessibilityNodeInfo target = nodes.get(0);
+            // Try ACTION_LONG_CLICK walking up to find a long-clickable ancestor
+            boolean clicked = performLongClickOn(target);
+            for (AccessibilityNodeInfo n : nodes) n.recycle();
+            return clicked ? "{\"long_clicked\":true}" : "{\"error\":\"long click failed\"}";
+        } finally {
+            root.recycle();
+        }
+    }
+
+    private boolean performLongClickOn(AccessibilityNodeInfo node) {
+        AccessibilityNodeInfo current = node;
+        while (current != null) {
+            if (current.isLongClickable()) {
+                return current.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK);
+            }
+            AccessibilityNodeInfo parent = current.getParent();
+            current = parent;
+        }
+        // Fallback: long-press gesture at center of bounds
+        Rect bounds = new Rect();
+        node.getBoundsInScreen(bounds);
+        return tapAtSync(bounds.centerX(), bounds.centerY(), 600);
+    }
+
+    /* ---- Scroll ---- */
+
+    private String scroll(String args) {
+        if (args == null || args.isEmpty()) {
+            return "{\"error\":\"usage: <up|down|left|right|forward|backward> [view_id]\"}";
+        }
+        String[] parts = args.trim().split("\\s+", 2);
+        String direction = parts[0].toLowerCase();
+        String viewId = parts.length > 1 ? parts[1] : null;
+
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return "{\"error\":\"no active window\"}";
+
+        try {
+            AccessibilityNodeInfo scrollable = null;
+
+            // If ID specified, find that specific scrollable
+            if (viewId != null) {
+                CharSequence pkg = root.getPackageName();
+                if (pkg != null) {
+                    String rid = pkg + ":id/" + viewId;
+                    java.util.List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId(rid);
+                    if (!nodes.isEmpty()) scrollable = nodes.get(0);
+                }
+            }
+
+            // Otherwise find the first scrollable container
+            if (scrollable == null) {
+                scrollable = findScrollable(root);
+            }
+
+            if (scrollable == null) {
+                return "{\"error\":\"no scrollable container found\"}";
+            }
+
+            int action;
+            switch (direction) {
+                case "down":
+                case "forward":
+                    action = AccessibilityNodeInfo.ACTION_SCROLL_FORWARD;
+                    break;
+                case "up":
+                case "backward":
+                    action = AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD;
+                    break;
+                case "left":
+                    action = AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.getId();
+                    break;
+                case "right":
+                    action = AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.getId();
+                    break;
+                default:
+                    scrollable.recycle();
+                    return "{\"error\":\"direction must be up/down/left/right/forward/backward\"}";
+            }
+
+            boolean ok = scrollable.performAction(action);
+            scrollable.recycle();
+            return ok ? "{\"scrolled\":\"" + direction + "\"}" : "{\"error\":\"scroll failed\"}";
+        } finally {
+            root.recycle();
+        }
+    }
+
+    private AccessibilityNodeInfo findScrollable(AccessibilityNodeInfo node) {
+        if (node == null) return null;
+        if (node.isScrollable()) return AccessibilityNodeInfo.obtain(node);
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child == null) continue;
+            AccessibilityNodeInfo result = findScrollable(child);
+            child.recycle();
+            if (result != null) return result;
+        }
+        return null;
+    }
+
+    /* ---- Wait for element ---- */
+
+    private String waitFor(String args) {
+        if (args == null || args.isEmpty()) {
+            return "{\"error\":\"usage: <text> [timeout_secs]\"}";
+        }
+        // Parse: "Some text 10" or "Some text"
+        String text;
+        int timeoutSecs = 10;
+        // Try to extract timeout from end
+        String trimmed = args.trim();
+        int lastSpace = trimmed.lastIndexOf(' ');
+        if (lastSpace > 0) {
+            try {
+                timeoutSecs = Integer.parseInt(trimmed.substring(lastSpace + 1));
+                text = trimmed.substring(0, lastSpace);
+            } catch (NumberFormatException e) {
+                text = trimmed;
+            }
+        } else {
+            text = trimmed;
+        }
+
+        long deadline = System.currentTimeMillis() + (timeoutSecs * 1000L);
+        int polls = 0;
+
+        while (System.currentTimeMillis() < deadline) {
+            polls++;
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root != null) {
+                java.util.List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(text);
+                if (!nodes.isEmpty()) {
+                    // Found it — return info about the first match
+                    AccessibilityNodeInfo n = nodes.get(0);
+                    StringBuilder sb = new StringBuilder("{\"found\":true,\"polls\":");
+                    sb.append(polls);
+                    CharSequence cls = n.getClassName();
+                    if (cls != null) {
+                        String c = cls.toString();
+                        int dot = c.lastIndexOf('.');
+                        if (dot >= 0) c = c.substring(dot + 1);
+                        sb.append(",\"cls\":\"").append(esc(c)).append("\"");
+                    }
+                    CharSequence t = n.getText();
+                    if (t != null) sb.append(",\"text\":\"").append(esc(t.toString())).append("\"");
+                    Rect bounds = new Rect();
+                    n.getBoundsInScreen(bounds);
+                    sb.append(",\"bounds\":[").append(bounds.left).append(",").append(bounds.top)
+                      .append(",").append(bounds.width()).append(",").append(bounds.height()).append("]");
+                    if (n.isClickable()) sb.append(",\"click\":true");
+                    sb.append("}");
+                    for (AccessibilityNodeInfo node : nodes) node.recycle();
+                    root.recycle();
+                    return sb.toString();
+                }
+                root.recycle();
+            }
+            try { Thread.sleep(500); } catch (InterruptedException e) { break; }
+        }
+        return "{\"found\":false,\"timeout\":" + timeoutSecs + ",\"polls\":" + polls + "}";
+    }
+
+    /* ---- Launch app ---- */
+
+    private String launch(String args) {
+        if (args == null || args.isEmpty()) {
+            return "{\"error\":\"usage: <package_name>\"}";
+        }
+        String pkg = args.trim();
+        try {
+            PackageManager pm = getPackageManager();
+            Intent intent = pm.getLaunchIntentForPackage(pkg);
+            if (intent == null) {
+                return "{\"error\":\"no launch intent for: " + esc(pkg) + "\"}";
+            }
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            startActivity(intent);
+            return "{\"launched\":\"" + esc(pkg) + "\"}";
+        } catch (Exception e) {
+            return "{\"error\":\"" + esc(e.getMessage()) + "\"}";
+        }
+    }
+
+    /* ---- Node info by ID ---- */
+
+    private String nodeInfo(String args) {
+        if (args == null || args.isEmpty()) {
+            return "{\"error\":\"usage: <view_id>\"}";
+        }
+        String id = args.trim();
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return "{\"error\":\"no active window\"}";
+
+        try {
+            AccessibilityNodeInfo target = null;
+            // Try with package prefix
+            CharSequence pkg = root.getPackageName();
+            if (pkg != null) {
+                String rid = pkg + ":id/" + id;
+                java.util.List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId(rid);
+                if (!nodes.isEmpty()) target = nodes.get(0);
+            }
+            // Try as fully qualified
+            if (target == null && id.contains(":")) {
+                java.util.List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId(id);
+                if (!nodes.isEmpty()) target = nodes.get(0);
+            }
+            if (target == null) {
+                return "{\"error\":\"not found: " + esc(id) + "\"}";
+            }
+
+            StringBuilder sb = new StringBuilder("{");
+            // Class
+            CharSequence cls = target.getClassName();
+            if (cls != null) {
+                String c = cls.toString();
+                int dot = c.lastIndexOf('.');
+                if (dot >= 0) c = c.substring(dot + 1);
+                sb.append("\"cls\":\"").append(esc(c)).append("\"");
+            }
+            // Text
+            CharSequence text = target.getText();
+            if (text != null) sb.append(",\"text\":\"").append(esc(text.toString())).append("\"");
+            // Content description
+            CharSequence desc = target.getContentDescription();
+            if (desc != null) sb.append(",\"desc\":\"").append(esc(desc.toString())).append("\"");
+            // Full view ID
+            String viewId = target.getViewIdResourceName();
+            if (viewId != null) sb.append(",\"viewId\":\"").append(esc(viewId)).append("\"");
+            // Bounds
+            Rect bounds = new Rect();
+            target.getBoundsInScreen(bounds);
+            sb.append(",\"bounds\":[").append(bounds.left).append(",").append(bounds.top)
+              .append(",").append(bounds.width()).append(",").append(bounds.height()).append("]");
+            // All boolean properties
+            sb.append(",\"clickable\":").append(target.isClickable());
+            sb.append(",\"longClickable\":").append(target.isLongClickable());
+            sb.append(",\"editable\":").append(target.isEditable());
+            sb.append(",\"focusable\":").append(target.isFocusable());
+            sb.append(",\"focused\":").append(target.isFocused());
+            sb.append(",\"scrollable\":").append(target.isScrollable());
+            sb.append(",\"checkable\":").append(target.isCheckable());
+            sb.append(",\"checked\":").append(target.isChecked());
+            sb.append(",\"selected\":").append(target.isSelected());
+            sb.append(",\"enabled\":").append(target.isEnabled());
+            sb.append(",\"visible\":").append(target.isVisibleToUser());
+            sb.append(",\"password\":").append(target.isPassword());
+            // Available actions
+            sb.append(",\"actions\":[");
+            java.util.List<AccessibilityNodeInfo.AccessibilityAction> actions = target.getActionList();
+            boolean first = true;
+            for (AccessibilityNodeInfo.AccessibilityAction a : actions) {
+                if (!first) sb.append(",");
+                first = false;
+                CharSequence label = a.getLabel();
+                sb.append("{\"id\":").append(a.getId());
+                if (label != null) sb.append(",\"label\":\"").append(esc(label.toString())).append("\"");
+                sb.append("}");
+            }
+            sb.append("]");
+            // Child count
+            sb.append(",\"childCount\":").append(target.getChildCount());
+
+            sb.append("}");
+            target.recycle();
+            return sb.toString();
+        } finally {
+            root.recycle();
+        }
     }
 
     /* ---- Gesture dispatch helper ---- */

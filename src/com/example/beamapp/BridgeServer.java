@@ -326,6 +326,12 @@ public class BridgeServer {
                 case "screen_notifications": result = cmdScreen("globalAction", "notifications"); break;
                 case "screen_screenshot": result = cmdScreen("screenshot", args); break;
                 case "screen_info":    result = cmdScreen("getInfo", args); break;
+                case "screen_key":     result = cmdScreen("sendKey", args); break;
+                case "screen_long_click": result = cmdScreen("longClick", args); break;
+                case "screen_scroll":  result = cmdScreen("scroll", args); break;
+                case "screen_wait":    result = cmdScreen("waitFor", args); break;
+                case "screen_launch":  result = cmdScreen("launch", args); break;
+                case "screen_node":    result = cmdScreen("nodeInfo", args); break;
                 case "ping":           result = "\"pong\""; break;
                 default:
                     return "{\"id\":" + id + ",\"ok\":false,\"error\":\"unknown command: " + cmd + "\"}";

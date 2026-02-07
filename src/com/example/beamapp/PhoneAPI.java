@@ -907,7 +907,13 @@ public class PhoneAPI {
             "{\"cmd\":\"screen_home\",\"desc\":\"Press Home button\"}," +
             "{\"cmd\":\"screen_recents\",\"desc\":\"Open recent apps\"}," +
             "{\"cmd\":\"screen_notifications\",\"desc\":\"Open notification shade\"}," +
-            "{\"cmd\":\"screen_screenshot\",\"args\":\"[path]\",\"desc\":\"Take screenshot (API 30+)\"}" +
+            "{\"cmd\":\"screen_screenshot\",\"args\":\"[path]\",\"desc\":\"Take screenshot (API 30+)\"}," +
+            "{\"cmd\":\"screen_key\",\"args\":\"<key>\",\"desc\":\"Send key (enter/backspace/tab/escape/arrows/home/end)\"}," +
+            "{\"cmd\":\"screen_long_click\",\"args\":\"<text> or <x> <y>\",\"desc\":\"Long press element or coordinates\"}," +
+            "{\"cmd\":\"screen_scroll\",\"args\":\"<up|down|left|right> [id]\",\"desc\":\"Scroll container\"}," +
+            "{\"cmd\":\"screen_wait\",\"args\":\"<text> [timeout_secs]\",\"desc\":\"Wait for UI element to appear\"}," +
+            "{\"cmd\":\"screen_launch\",\"args\":\"<package>\",\"desc\":\"Launch app by package name\"}," +
+            "{\"cmd\":\"screen_node\",\"args\":\"<view_id>\",\"desc\":\"Get detailed node info by ID\"}" +
             "]";
     }
 }
