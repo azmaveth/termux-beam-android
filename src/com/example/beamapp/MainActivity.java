@@ -36,6 +36,11 @@ public class MainActivity extends Activity {
     private Button stopButton;
     private Button sendButton;
     private Button copyButton;
+    private Button listenButton;
+
+    private volatile boolean isListening = false;
+    private volatile Socket listenSocket;
+    private int partialLogStart = -1;
 
     private StringBuilder logBuffer = new StringBuilder();
 
@@ -81,6 +86,19 @@ public class MainActivity extends Activity {
         stopButton = findViewById(R.id.stop_button);
         sendButton = findViewById(R.id.send_button);
         copyButton = findViewById(R.id.copy_button);
+        listenButton = findViewById(R.id.listen_button);
+        listenButton.setEnabled(false);
+
+        listenButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (!isListening) {
+                    startStreamListen();
+                } else {
+                    stopStreamListen();
+                }
+            }
+        });
 
         copyButton.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -176,11 +194,47 @@ public class MainActivity extends Activity {
             needed.add("android.permission.ACCESS_COARSE_LOCATION");
         }
 
+        /* Microphone (runtime permission) */
+        if (checkSelfPermission("android.permission.RECORD_AUDIO")
+                != PackageManager.PERMISSION_GRANTED) {
+            needed.add("android.permission.RECORD_AUDIO");
+        }
+
         /* Notifications (runtime on Android 13+) */
         if (Build.VERSION.SDK_INT >= 33) {
             if (checkSelfPermission("android.permission.POST_NOTIFICATIONS")
                     != PackageManager.PERMISSION_GRANTED) {
                 needed.add("android.permission.POST_NOTIFICATIONS");
+            }
+        }
+
+        /* Bluetooth (runtime on Android 12+) */
+        if (checkSelfPermission("android.permission.BLUETOOTH_CONNECT")
+                != PackageManager.PERMISSION_GRANTED) {
+            needed.add("android.permission.BLUETOOTH_CONNECT");
+        }
+        if (checkSelfPermission("android.permission.BLUETOOTH_SCAN")
+                != PackageManager.PERMISSION_GRANTED) {
+            needed.add("android.permission.BLUETOOTH_SCAN");
+        }
+
+        /* Camera */
+        if (checkSelfPermission("android.permission.CAMERA")
+                != PackageManager.PERMISSION_GRANTED) {
+            needed.add("android.permission.CAMERA");
+        }
+
+        /* Contacts, Call Log, SMS, Phone State */
+        String[] extraPerms = {
+            "android.permission.READ_CONTACTS",
+            "android.permission.READ_CALL_LOG",
+            "android.permission.READ_SMS",
+            "android.permission.SEND_SMS",
+            "android.permission.READ_PHONE_STATE"
+        };
+        for (String perm : extraPerms) {
+            if (checkSelfPermission(perm) != PackageManager.PERMISSION_GRANTED) {
+                needed.add(perm);
             }
         }
 
@@ -196,13 +250,124 @@ public class MainActivity extends Activity {
             startButton.setEnabled(false);
             stopButton.setEnabled(true);
             sendButton.setEnabled(true);
+            listenButton.setEnabled(true);
         } else {
             statusText.setText("Stopped");
             statusText.setTextColor(0xFF999999);
             startButton.setEnabled(true);
             stopButton.setEnabled(false);
             sendButton.setEnabled(false);
+            listenButton.setEnabled(false);
+            if (isListening) stopStreamListen();
         }
+    }
+
+    private void startStreamListen() {
+        isListening = true;
+        partialLogStart = -1;
+        listenButton.setText(R.string.stop_listen);
+        appendLog("[Listening...]\n");
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Socket sock = new Socket("127.0.0.1", 9877);
+                    listenSocket = sock;
+                    OutputStream os = sock.getOutputStream();
+                    BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(sock.getInputStream()));
+
+                    // Send pre_listen first to start mic immediately, then stream_listen
+                    String preReq = "{\"id\":98,\"cmd\":\"pre_listen\",\"args\":\"\"}";
+                    os.write((preReq + "\n").getBytes());
+                    os.flush();
+                    // Read pre_listen response (quick)
+                    reader.readLine();
+
+                    String request = "{\"id\":99,\"cmd\":\"stream_listen\",\"args\":\"120\"}";
+                    os.write((request + "\n").getBytes());
+                    os.flush();
+
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        final String json = line;
+                        if (line.contains("\"partial\":true")) {
+                            int textStart = line.indexOf("\"text\":\"") + 8;
+                            int textEnd = line.lastIndexOf("\"");
+                            if (textStart > 7 && textEnd > textStart) {
+                                final String text = line.substring(textStart, textEnd)
+                                    .replace("\\n", "\n").replace("\\\"", "\"");
+                                runOnUiThread(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        if (partialLogStart >= 0) {
+                                            logBuffer.setLength(partialLogStart);
+                                        } else {
+                                            partialLogStart = logBuffer.length();
+                                        }
+                                        appendLog("[STT] " + text + "\n");
+                                    }
+                                });
+                            }
+                        } else {
+                            /* Final response — extract data */
+                            partialLogStart = -1;
+                            final String finalText;
+                            int dataIdx = line.indexOf("\"data\":");
+                            if (dataIdx >= 0) {
+                                finalText = line.substring(dataIdx + 7,
+                                    line.length() - 1);
+                            } else {
+                                finalText = json;
+                            }
+                            runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    appendLog("[Final] " + finalText + "\n");
+                                }
+                            });
+                            break;
+                        }
+                    }
+
+                    sock.close();
+                } catch (final Exception e) {
+                    final String msg = e.getMessage();
+                    if (isListening) {
+                        runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                appendLog("[Listen error] " + msg + "\n");
+                            }
+                        });
+                    }
+                } finally {
+                    listenSocket = null;
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            isListening = false;
+                            partialLogStart = -1;
+                            listenButton.setText(R.string.start_listen);
+                        }
+                    });
+                }
+            }
+        }).start();
+    }
+
+    private void stopStreamListen() {
+        isListening = false;
+        listenButton.setText(R.string.start_listen);
+        partialLogStart = -1;
+        Socket sock = listenSocket;
+        if (sock != null) {
+            try {
+                sock.close();
+            } catch (Exception e) { /* ignore */ }
+        }
+        appendLog("[Stopped listening]\n");
     }
 
     private void appendLog(String text) {

@@ -1,33 +1,16 @@
 #!/bin/bash
-# Build BeamApp APK in Termux
-# Usage: bash build.sh
-set -e
+exec > /data/data/com.termux/files/home/BeamApp/build.log 2>&1
+set -ex
 
-PROJECT="$(cd "$(dirname "$0")" && pwd)"
+export PATH="/data/data/com.termux/files/usr/bin:$PATH"
+
+PROJECT="/data/data/com.termux/files/home/BeamApp"
+ANDROID_JAR="/data/data/com.termux/files/home/HelloWorld/build/android-13/android.jar"
 BUILD="$PROJECT/build"
 GEN="$BUILD/gen"
 OBJ="$BUILD/obj"
 APK_DIR="$BUILD/apk"
 COMPILED_RES="$BUILD/compiled_res"
-
-# Auto-detect android.jar location
-if [ -z "$ANDROID_JAR" ]; then
-    ANDROID_JAR="$(find "$HOME" -name android.jar -path "*/android-*/android.jar" 2>/dev/null | head -1)"
-fi
-if [ ! -f "$ANDROID_JAR" ]; then
-    echo "ERROR: android.jar not found. Set ANDROID_JAR or run setup.sh first."
-    exit 1
-fi
-
-# Keystore
-KEYSTORE="${KEYSTORE:-$HOME/.debug.keystore}"
-if [ ! -f "$KEYSTORE" ]; then
-    echo "Creating debug keystore..."
-    keytool -genkeypair -keystore "$KEYSTORE" -alias debug \
-        -keyalg RSA -keysize 2048 -validity 10000 \
-        -storepass android -keypass android \
-        -dname "CN=Debug,O=Debug,C=US"
-fi
 
 echo "=== Cleaning build artifacts ==="
 rm -rf "$GEN" "$OBJ" "$APK_DIR" "$COMPILED_RES" "$BUILD/classes.dex"
@@ -46,20 +29,33 @@ aapt2 link \
     "$COMPILED_RES"/*.flat
 
 echo "=== Step 3: Compile Java ==="
+# Collect all sherpa-onnx Java API source files
+SHERPA_JAVA=$(find "$PROJECT/src/com/k2fsa" -name "*.java" 2>/dev/null)
 javac \
-    -source 1.8 -target 1.8 \
+    -source 11 -target 11 \
     -classpath "$ANDROID_JAR" \
     -d "$OBJ" \
     "$GEN/com/example/beamapp/R.java" \
-    "$PROJECT/src/com/example/beamapp/"*.java
+    $SHERPA_JAVA \
+    "$PROJECT/src/com/example/beamapp/SpeechEngine.java" \
+    "$PROJECT/src/com/example/beamapp/PhoneAPI.java" \
+    "$PROJECT/src/com/example/beamapp/BuddieService.java" \
+    "$PROJECT/src/com/example/beamapp/BridgeServer.java" \
+    "$PROJECT/src/com/example/beamapp/ScreenService.java" \
+    "$PROJECT/src/com/example/beamapp/BeamService.java" \
+    "$PROJECT/src/com/example/beamapp/MainActivity.java"
 
 echo "=== Step 4: DEX ==="
-dx --dex --output="$BUILD/classes.dex" "$OBJ"
+# Collect all .class files from both packages
+find "$OBJ" -name "*.class" > "$BUILD/classlist.txt"
+java -cp /data/data/com.termux/files/home/tools/r8.jar com.android.tools.r8.D8 --min-api 26 --output "$BUILD/" $(cat "$BUILD/classlist.txt")
 
 echo "=== Step 5: Package APK ==="
 cp "$APK_DIR/beamapp-unsigned.apk" "$APK_DIR/beamapp-tmp.apk"
 cd "$BUILD"
+# Add DEX
 zip -j "$APK_DIR/beamapp-tmp.apk" classes.dex
+# Add native libraries UNCOMPRESSED (-0) — required by Android
 zip -0 "$APK_DIR/beamapp-tmp.apk" lib/arm64-v8a/*.so
 cd "$PROJECT"
 
@@ -68,17 +64,20 @@ zipalign -f 4 "$APK_DIR/beamapp-tmp.apk" "$APK_DIR/beamapp.apk"
 
 echo "=== Step 7: Sign ==="
 apksigner sign \
-    --ks "$KEYSTORE" \
+    --ks "/data/data/com.termux/files/home/.debug.keystore" \
     --ks-key-alias debug \
     --ks-pass pass:android \
     --key-pass pass:android \
     "$APK_DIR/beamapp.apk"
 
-# Copy to /sdcard for easy install
-cp "$APK_DIR/beamapp.apk" /sdcard/beamapp.apk 2>/dev/null || true
+echo ""
+echo "=== Copying to /sdcard ==="
+cp "$APK_DIR/beamapp.apk" /sdcard/beamapp.apk
 
 echo ""
 echo "=== BUILD SUCCESSFUL ==="
 ls -lh "$APK_DIR/beamapp.apk"
+ls -lh /sdcard/beamapp.apk
+unzip -l "$APK_DIR/beamapp.apk" | grep -E "\.so|classes\.dex|assets" | head -20
 echo ""
-echo "Install: termux-open $APK_DIR/beamapp.apk"
+echo "---DONE---"

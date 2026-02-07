@@ -138,7 +138,16 @@ public class BeamService extends Service {
                         "io:format(\"  sensors accel gyro light wifi network memory,~n\"), " +
                         "io:format(\"  notify <t> <b>, clipboard, copy <text>,~n\"), " +
                         "io:format(\"  packages, brightness, procs, prop <name>,~n\"), " +
-                        "io:format(\"  services, features, shell <cmd>~n~n\"), " +
+                        "io:format(\"  services, features, shell <cmd>,~n\"), " +
+                        "io:format(\"  say <text>, listen [secs], stream_listen [secs],~n\"), " +
+                        "io:format(\"  record [secs], stt [path], transcribe [path],~n\"), " +
+                        "io:format(\"  diarize [path], speech_status,~n\"), " +
+                        "io:format(\"  bt_status, bt_bonded, bt_connected,~n\"), " +
+                        "io:format(\"  bt_scan [secs], bt_scan_ble [secs],~n\"), " +
+                        "io:format(\"  bt_gatt <addr>, bt_gatt_read <addr> <uuid>,~n\"), " +
+                        "io:format(\"  bt_gatt_write <addr> <uuid> <hex>,~n\"), " +
+                        "io:format(\"  bt_gatt_notify <addr> <uuid> [secs],~n\"), " +
+                        "io:format(\"  bt_rssi <addr>~n~n\"), " +
 
                         /* Start command TCP server on 9876 for interactive use */
                         "CmdPort = 9876, " +
@@ -191,11 +200,63 @@ public class BeamService extends Service {
                         "          <<\"services\">> -> android:call(<<\"services\">>); " +
                         "          <<\"features\">> -> android:call(<<\"features\">>); " +
                         "          <<\"shell \", ShCmd/binary>> -> android:call(<<\"shell\">>, ShCmd); " +
+                        "          <<\"say \", Txt/binary>> -> android:call(<<\"tts\">>, Txt, 30000); " +
+                        "          <<\"listen\">> -> android:call(<<\"listen\">>, <<\"5\">>, 15000); " +
+                        "          <<\"listen \", Dur/binary>> -> " +
+                        "            Secs = binary_to_integer(string:trim(Dur)), " +
+                        "            android:call(<<\"listen\">>, Dur, (Secs + 5) * 1000); " +
+                        "          <<\"stream_listen\">> -> android:call(<<\"stream_listen\">>, <<\"10\">>, 20000); " +
+                        "          <<\"stream_listen \", Dur/binary>> -> " +
+                        "            Secs2 = binary_to_integer(string:trim(Dur)), " +
+                        "            android:call(<<\"stream_listen\">>, Dur, (Secs2 + 5) * 1000); " +
+                        "          <<\"speech_status\">> -> android:call(<<\"speech_status\">>); " +
+                        "          <<\"record\">> -> android:call(<<\"mic_record\">>, <<\"5\">>); " +
+                        "          <<\"record \", Dur/binary>> -> android:call(<<\"mic_record\">>, Dur); " +
+                        "          <<\"stt\">> -> android:call(<<\"stt\">>, <<>>, 30000); " +
+                        "          <<\"stt \", Path/binary>> -> android:call(<<\"stt\">>, Path, 30000); " +
+                        "          <<\"transcribe\">> -> android:call(<<\"transcribe_offline\">>, <<>>, 60000); " +
+                        "          <<\"transcribe \", Path/binary>> -> android:call(<<\"transcribe_offline\">>, Path, 60000); " +
+                        "          <<\"diarize\">> -> android:call(<<\"diarize\">>, <<>>, 120000); " +
+                        "          <<\"diarize \", Path/binary>> -> android:call(<<\"diarize\">>, Path, 120000); " +
+                        "          <<\"bt_status\">> -> android:call(<<\"bt_status\">>); " +
+                        "          <<\"bt_bonded\">> -> android:call(<<\"bt_bonded\">>); " +
+                        "          <<\"bt_connected\">> -> android:call(<<\"bt_connected\">>, <<>>, 10000); " +
+                        "          <<\"bt_scan\">> -> android:call(<<\"bt_scan\">>, <<\"5\">>, 15000); " +
+                        "          <<\"bt_scan \", Dur3/binary>> -> " +
+                        "            Secs3 = binary_to_integer(string:trim(Dur3)), " +
+                        "            android:call(<<\"bt_scan\">>, Dur3, (Secs3 + 5) * 1000); " +
+                        "          <<\"bt_scan_ble\">> -> android:call(<<\"bt_scan_ble\">>, <<\"5\">>, 15000); " +
+                        "          <<\"bt_scan_ble \", Dur4/binary>> -> " +
+                        "            Secs4 = binary_to_integer(string:trim(Dur4)), " +
+                        "            android:call(<<\"bt_scan_ble\">>, Dur4, (Secs4 + 5) * 1000); " +
+                        "          <<\"bt_gatt \", Addr/binary>> -> " +
+                        "            android:call(<<\"bt_gatt\">>, Addr, 15000); " +
+                        "          <<\"bt_gatt_read \", RArgs/binary>> -> " +
+                        "            android:call(<<\"bt_gatt_read\">>, RArgs, 15000); " +
+                        "          <<\"bt_gatt_write \", WArgs/binary>> -> " +
+                        "            android:call(<<\"bt_gatt_write\">>, WArgs, 15000); " +
+                        "          <<\"bt_gatt_notify \", NArgs/binary>> -> " +
+                        "            case binary:split(string:trim(NArgs), <<\" \">>, [global]) of " +
+                        "              [NA, NU, NS] -> " +
+                        "                NSecs = binary_to_integer(string:trim(NS)), " +
+                        "                android:call(<<\"bt_gatt_notify\">>, NArgs, (NSecs + 10) * 1000); " +
+                        "              _ -> android:call(<<\"bt_gatt_notify\">>, NArgs, 20000) " +
+                        "            end; " +
+                        "          <<\"bt_rssi \", RAddr/binary>> -> " +
+                        "            android:call(<<\"bt_rssi\">>, RAddr, 10000); " +
                         "          _ -> {ok, <<\"Unknown: \", Cmd/binary, " +
                         "            \". Try: device battery memory wifi sensors accel \" " +
                         "            \"gyro light vibrate toast <msg> notify <t> <b> \" " +
                         "            \"clipboard copy <text> packages brightness ping \" " +
-                        "            \"services features shell <cmd> prop <name>\">>} " +
+                        "            \"services features shell <cmd> prop <name> \" " +
+                        "            \"say <text> listen [secs] stream_listen [secs] \" " +
+                        "            \"record [secs] stt [path] transcribe [path] \" " +
+                        "            \"diarize [path] speech_status \" " +
+                        "            \"bt_status bt_bonded bt_connected \" " +
+                        "            \"bt_scan [secs] bt_scan_ble [secs] \" " +
+                        "            \"bt_gatt <addr> bt_gatt_read <addr> <uuid> \" " +
+                        "            \"bt_gatt_write <addr> <uuid> <hex> \" " +
+                        "            \"bt_gatt_notify <addr> <uuid> [secs] bt_rssi <addr>\">>} " +
                         "        end " +
                         "      catch E:R -> {error, list_to_binary(io_lib:format(\"~p:~p\", [E,R]))} " +
                         "      end, " +

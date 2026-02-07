@@ -24,7 +24,7 @@
 
 %% Public API
 -export([start_link/0, start_link/1, stop/0]).
--export([call/1, call/2]).
+-export([call/1, call/2, call/3]).
 -export([device_info/0, battery/0, vibrate/0, vibrate/1]).
 -export([toast/1, notify/2]).
 -export([clipboard_get/0, clipboard_set/1]).
@@ -47,6 +47,7 @@
 -define(SERVER, ?MODULE).
 -define(DEFAULT_PORT, 9877).
 -define(TIMEOUT, 5000).
+-define(SPEECH_TIMEOUT, 60000).
 
 %%% ============================================================
 %%% Public API
@@ -60,9 +61,10 @@ start_link(Port) ->
 stop() -> gen_server:stop(?SERVER).
 
 %% Generic call
-call(Cmd) -> call(Cmd, <<>>).
-call(Cmd, Args) ->
-    gen_server:call(?SERVER, {cmd, Cmd, Args}, ?TIMEOUT).
+call(Cmd) -> call(Cmd, <<>>, ?TIMEOUT).
+call(Cmd, Args) -> call(Cmd, Args, ?TIMEOUT).
+call(Cmd, Args, Timeout) ->
+    gen_server:call(?SERVER, {cmd, Cmd, Args}, Timeout).
 
 %% ---- Device ----
 
