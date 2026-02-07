@@ -42,6 +42,7 @@ javac \
     "$PROJECT/src/com/example/beamapp/BuddieService.java" \
     "$PROJECT/src/com/example/beamapp/BridgeServer.java" \
     "$PROJECT/src/com/example/beamapp/ScreenService.java" \
+    "$PROJECT/src/com/example/beamapp/BootReceiver.java" \
     "$PROJECT/src/com/example/beamapp/BeamService.java" \
     "$PROJECT/src/com/example/beamapp/MainActivity.java"
 

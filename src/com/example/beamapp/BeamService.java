@@ -56,6 +56,10 @@ public class BeamService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         startForeground(NOTIFICATION_ID, buildNotification());
+        if (intent != null && intent.getBooleanExtra("autostart", false)) {
+            Log.i(TAG, "Autostart requested — launching BEAM VM");
+            startBeam();
+        }
         return START_STICKY;
     }
 
