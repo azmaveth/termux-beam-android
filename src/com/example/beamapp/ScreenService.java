@@ -611,7 +611,12 @@ public class ScreenService extends AccessibilityService {
         if (args == null || args.isEmpty()) {
             return "{\"error\":\"usage: <key> — keys: enter, backspace, delete, tab, escape, up, down, left, right, home, end\"}";
         }
-        String key = args.trim().toLowerCase();
+        String raw = args.trim();
+        // Single printable character — append to focused editable
+        if (raw.length() == 1 && !Character.isLetter(raw.charAt(0))) {
+            return appendText(raw);
+        }
+        String key = raw.toLowerCase();
         AccessibilityNodeInfo root = getRootInActiveWindow();
 
         switch (key) {
@@ -741,10 +746,6 @@ public class ScreenService extends AccessibilityService {
             }
             default: {
                 if (root != null) root.recycle();
-                // For single printable chars, append to focused editable
-                if (key.length() == 1 || args.trim().length() == 1) {
-                    return appendText(args.trim());
-                }
                 return "{\"error\":\"unknown key: " + esc(key) + "\"}";
             }
         }
