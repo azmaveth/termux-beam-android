@@ -612,10 +612,6 @@ public class ScreenService extends AccessibilityService {
             return "{\"error\":\"usage: <key> — keys: enter, backspace, delete, tab, escape, up, down, left, right, home, end\"}";
         }
         String raw = args.trim();
-        // Single printable character — append to focused editable
-        if (raw.length() == 1 && !Character.isLetter(raw.charAt(0))) {
-            return appendText(raw);
-        }
         String key = raw.toLowerCase();
         AccessibilityNodeInfo root = getRootInActiveWindow();
 
@@ -745,30 +741,28 @@ public class ScreenService extends AccessibilityService {
                 return "{\"error\":\"no focused node\"}";
             }
             default: {
+                // Single printable character — append to focused editable
+                if (raw.length() == 1) {
+                    if (root != null) {
+                        AccessibilityNodeInfo focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+                        if (focused != null && focused.isEditable()) {
+                            CharSequence text = focused.getText();
+                            String newText = (text != null ? text.toString() : "") + raw;
+                            Bundle b = new Bundle();
+                            b.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText);
+                            boolean ok = focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, b);
+                            focused.recycle();
+                            root.recycle();
+                            return ok ? "{\"key\":\"" + esc(raw) + "\",\"ok\":true}" : "{\"error\":\"append failed\"}";
+                        }
+                        if (focused != null) focused.recycle();
+                        root.recycle();
+                    }
+                    return "{\"error\":\"no editable focused node\"}";
+                }
                 if (root != null) root.recycle();
                 return "{\"error\":\"unknown key: " + esc(key) + "\"}";
             }
-        }
-    }
-
-    private String appendText(String ch) {
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) return "{\"error\":\"no active window\"}";
-        try {
-            AccessibilityNodeInfo focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
-            if (focused != null && focused.isEditable()) {
-                CharSequence text = focused.getText();
-                String newText = (text != null ? text.toString() : "") + ch;
-                Bundle b = new Bundle();
-                b.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText);
-                boolean ok = focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, b);
-                focused.recycle();
-                return ok ? "{\"key\":\"" + esc(ch) + "\",\"ok\":true}" : "{\"error\":\"append failed\"}";
-            }
-            if (focused != null) focused.recycle();
-            return "{\"error\":\"no editable focused node\"}";
-        } finally {
-            root.recycle();
         }
     }
 
