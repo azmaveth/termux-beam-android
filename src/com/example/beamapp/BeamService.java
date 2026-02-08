@@ -103,6 +103,11 @@ public class BeamService extends Service {
                                   libDir + "/libz.so.1");
                     createSymlink(nativeLibDir + "/libc++_shared.so",
                                   libDir + "/libc++_shared.so");
+                    /* OpenSSL libraries for crypto NIF */
+                    createSymlink(nativeLibDir + "/libcrypto3.so",
+                                  libDir + "/libcrypto.so.3");
+                    createSymlink(nativeLibDir + "/libssl3.so",
+                                  libDir + "/libssl.so.3");
 
                     /* Set up ERTS bin dir with proper names */
                     File ertsBin = new File(getFilesDir(), "erts/bin");
@@ -124,6 +129,18 @@ public class BeamService extends Service {
                         "io:format(\"OTP Release: ~s~n\", [erlang:system_info(otp_release)]), " +
                         "io:format(\"ERTS Version: ~s~n\", [erlang:system_info(version)]), " +
                         "io:format(\"Schedulers: ~p~n\", [erlang:system_info(schedulers)]), " +
+
+                        /* Start crypto and SSL */
+                        "io:format(\"~nStarting crypto... \"), " +
+                        "case application:ensure_all_started(ssl) of " +
+                        "  {ok, Started} -> " +
+                        "    io:format(\"ok (~p apps)~n\", [length(Started)]), " +
+                        "    [{_,_,CryptoVer}|_] = crypto:info_lib(), " +
+                        "    io:format(\"Crypto: ~s~n\", [CryptoVer]), " +
+                        "    io:format(\"SSL/TLS ready.~n\"); " +
+                        "  {error, Reason} -> " +
+                        "    io:format(\"FAILED: ~p~n\", [Reason]) " +
+                        "end, " +
 
                         /* Start android bridge */
                         "timer:sleep(500), " +
@@ -291,8 +308,13 @@ public class BeamService extends Service {
                     appendOutput("  Root: " + rootDir + "\n");
                     appendOutput("  Bin:  " + binDir + "\n\n");
 
-                    /* Path to our android.beam module */
-                    String androidEbin = erlRoot.getAbsolutePath() + "/lib/android/ebin";
+                    /* Code paths for OTP apps */
+                    String libBase = erlRoot.getAbsolutePath() + "/lib";
+                    String androidEbin = libBase + "/android/ebin";
+                    String cryptoEbin = libBase + "/crypto-5.8/ebin";
+                    String asn1Ebin = libBase + "/asn1-5.4.2/ebin";
+                    String publicKeyEbin = libBase + "/public_key-1.20.1/ebin";
+                    String sslEbin = libBase + "/ssl-11.5.1/ebin";
 
                     ProcessBuilder pb = new ProcessBuilder(
                         beamPath,
@@ -301,6 +323,10 @@ public class BeamService extends Service {
                         "-boot", "start_clean",
                         "-noshell",
                         "-pa", androidEbin,
+                        "-pa", cryptoEbin,
+                        "-pa", asn1Ebin,
+                        "-pa", publicKeyEbin,
+                        "-pa", sslEbin,
                         "-eval", evalCode
                     );
 
