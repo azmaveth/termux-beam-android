@@ -265,19 +265,40 @@ public class BeamService extends Service {
                         "            end; " +
                         "          <<\"bt_rssi \", RAddr/binary>> -> " +
                         "            android:call(<<\"bt_rssi\">>, RAddr, 10000); " +
+
+                        /* eval — run arbitrary Erlang expression */
+                        "          <<\"eval \", Expr/binary>> -> " +
+                        "            {ok, Tokens, _} = erl_scan:string(binary_to_list(Expr)), " +
+                        "            {ok, Parsed} = erl_parse:parse_exprs(Tokens), " +
+                        "            {value, Val, _} = erl_eval:exprs(Parsed, []), " +
+                        "            {ok, list_to_binary(io_lib:format(\"~p\", [Val]))}; " +
+
+                        /* load_module — load .beam from base64 binary */
+                        "          <<\"load_module \", Rest/binary>> -> " +
+                        "            case binary:split(Rest, <<\" \">>) of " +
+                        "              [ModBin, B64] -> " +
+                        "                Mod = binary_to_atom(ModBin, utf8), " +
+                        "                Bytes = base64:decode(B64), " +
+                        "                case code:load_binary(Mod, atom_to_list(Mod) ++ \".beam\", Bytes) of " +
+                        "                  {module, Mod} -> " +
+                        "                    {ok, <<\"loaded \", ModBin/binary>>}; " +
+                        "                  {error, What} -> " +
+                        "                    {error, list_to_binary(io_lib:format(\"~p\", [What]))} " +
+                        "                end; " +
+                        "              _ -> {error, <<\"usage: load_module <name> <base64>\">>} " +
+                        "            end; " +
+
+                        /* modules — list loaded non-preloaded modules */
+                        "          <<\"modules\">> -> " +
+                        "            Mods = [atom_to_binary(M, utf8) || {M, F} <- code:all_loaded(), " +
+                        "              is_list(F)], " +
+                        "            {ok, list_to_binary(lists:join(<<\" \">>, lists:sort(Mods)))}; " +
+
                         "          _ -> {ok, <<\"Unknown: \", Cmd/binary, " +
-                        "            \". Try: device battery memory wifi sensors accel \" " +
-                        "            \"gyro light vibrate toast <msg> notify <t> <b> \" " +
-                        "            \"clipboard copy <text> packages brightness ping \" " +
-                        "            \"services features shell <cmd> prop <name> \" " +
+                        "            \". Try: device battery memory wifi sensors eval <expr> \" " +
+                        "            \"load_module <name> <base64> modules \" " +
                         "            \"say <text> listen [secs] stream_listen [secs] \" " +
-                        "            \"record [secs] stt [path] transcribe [path] \" " +
-                        "            \"diarize [path] speech_status \" " +
-                        "            \"bt_status bt_bonded bt_connected \" " +
-                        "            \"bt_scan [secs] bt_scan_ble [secs] \" " +
-                        "            \"bt_gatt <addr> bt_gatt_read <addr> <uuid> \" " +
-                        "            \"bt_gatt_write <addr> <uuid> <hex> \" " +
-                        "            \"bt_gatt_notify <addr> <uuid> [secs] bt_rssi <addr>\">>} " +
+                        "            \"bt_status bt_scan [secs] bt_scan_ble [secs]\">>} " +
                         "        end " +
                         "      catch E:R -> {error, list_to_binary(io_lib:format(\"~p:~p\", [E,R]))} " +
                         "      end, " +
@@ -316,6 +337,16 @@ public class BeamService extends Service {
                     String publicKeyEbin = libBase + "/public_key-1.20.1/ebin";
                     String sslEbin = libBase + "/ssl-11.5.1/ebin";
 
+                    /* User module directory — drop .beam files here */
+                    File modulesDir = new File(getFilesDir(), "beam-modules");
+                    modulesDir.mkdirs();
+                    String modulesPath = modulesDir.getAbsolutePath();
+                    /* Also create /sdcard/.beam-modules for easy access from Termux */
+                    File sdModules = new File("/sdcard/.beam-modules");
+                    sdModules.mkdirs();
+                    appendOutput("Modules: " + modulesPath + "\n");
+                    appendOutput("Modules: /sdcard/.beam-modules/\n");
+
                     ProcessBuilder pb = new ProcessBuilder(
                         beamPath,
                         "--", "-root", rootDir,
@@ -327,6 +358,8 @@ public class BeamService extends Service {
                         "-pa", asn1Ebin,
                         "-pa", publicKeyEbin,
                         "-pa", sslEbin,
+                        "-pa", modulesPath,
+                        "-pa", "/sdcard/.beam-modules",
                         "-eval", evalCode
                     );
 

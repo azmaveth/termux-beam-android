@@ -54,7 +54,9 @@ import android.media.MediaRecorder;
 import java.io.BufferedReader;
 import java.io.DataOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.OutputStream;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.io.RandomAccessFile;
@@ -332,6 +334,10 @@ public class BridgeServer {
                 case "screen_wait":    result = cmdScreen("waitFor", args); break;
                 case "screen_launch":  result = cmdScreen("launch", args); break;
                 case "screen_node":    result = cmdScreen("nodeInfo", args); break;
+                case "beam_eval":      result = cmdBeam("eval " + args); break;
+                case "beam_load":      result = cmdBeam("load_module " + args); break;
+                case "beam_modules":   result = cmdBeam("modules"); break;
+                case "beam_sync":      result = cmdBeamSync(args); break;
                 case "ping":           result = "\"pong\""; break;
                 default:
                     return "{\"id\":" + id + ",\"ok\":false,\"error\":\"unknown command: " + cmd + "\"}";
@@ -361,6 +367,97 @@ public class BridgeServer {
         } catch (Exception e) {
             return "{\"error\":\"screen service error: " + escJson(e.getMessage()) + "\"}";
         }
+    }
+
+    /* ---- BEAM VM commands (port 9876) ---- */
+
+    private String cmdBeam(String command) {
+        try (Socket sock = new Socket("127.0.0.1", 9876)) {
+            sock.setSoTimeout(30000);
+            OutputStream os = sock.getOutputStream();
+            BufferedReader br = new BufferedReader(new InputStreamReader(sock.getInputStream()));
+            os.write(command.getBytes());
+            os.flush();
+            // Read response (terminated by newline)
+            char[] buf = new char[65536];
+            int n = br.read(buf);
+            if (n > 0) {
+                String resp = new String(buf, 0, n).trim();
+                if (resp.startsWith("ERROR: ")) {
+                    return "{\"error\":\"" + escJson(resp.substring(7)) + "\"}";
+                }
+                return "\"" + escJson(resp) + "\"";
+            }
+            return "{\"error\":\"no response from BEAM\"}";
+        } catch (java.net.ConnectException e) {
+            return "{\"error\":\"BEAM VM not running\"}";
+        } catch (Exception e) {
+            return "{\"error\":\"beam command error: " + escJson(e.getMessage()) + "\"}";
+        }
+    }
+
+    /* ---- BEAM module sync ---- */
+
+    /**
+     * Sync .beam files from /sdcard/.beam-modules/ to internal beam-modules dir,
+     * then tell BEAM to purge+load each synced module.
+     * Args: optional module name to sync just one, empty = sync all.
+     */
+    private String cmdBeamSync(String args) {
+        // Check all-files-access on Android 11+
+        if (Build.VERSION.SDK_INT >= 30 && !android.os.Environment.isExternalStorageManager()) {
+            return "{\"error\":\"need All Files Access — grant in Settings > Apps > BEAM Runner > Permissions > All files access\"}";
+        }
+
+        File srcDir = new File("/sdcard/.beam-modules");
+        File dstDir = new File(context.getFilesDir(), "beam-modules");
+        if (!srcDir.isDirectory()) return "{\"error\":\"source dir /sdcard/.beam-modules not found or not readable\"}";
+        dstDir.mkdirs();
+
+        File[] files;
+        if (args != null && !args.isEmpty()) {
+            String name = args.endsWith(".beam") ? args : args + ".beam";
+            File f = new File(srcDir, name);
+            if (!f.exists()) return "{\"error\":\"file not found: " + name + "\"}";
+            if (!f.canRead()) return "{\"error\":\"cannot read: " + name + " — check storage permissions\"}";
+            files = new File[]{f};
+        } else {
+            files = srcDir.listFiles((dir, name) -> name.endsWith(".beam"));
+            if (files == null || files.length == 0) return "{\"error\":\"no .beam files in /sdcard/.beam-modules/\"}";
+        }
+
+        List<String> synced = new ArrayList<>();
+        List<String> errors = new ArrayList<>();
+        for (File src : files) {
+            try {
+                File dst = new File(dstDir, src.getName());
+                try (FileInputStream fis = new FileInputStream(src);
+                     FileOutputStream fos = new FileOutputStream(dst)) {
+                    byte[] buf = new byte[8192];
+                    int n;
+                    while ((n = fis.read(buf)) > 0) fos.write(buf, 0, n);
+                }
+                // Tell BEAM to purge old version and load new one
+                String modName = src.getName().replace(".beam", "");
+                cmdBeam("eval code:purge(" + modName + "), code:load_file(" + modName + ").");
+                synced.add(modName);
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to sync " + src.getName(), e);
+                errors.add(src.getName() + ": " + e.getMessage());
+            }
+        }
+
+        if (synced.isEmpty()) {
+            String detail = errors.isEmpty() ? "unknown" : String.join("; ", errors);
+            return "{\"error\":\"sync failed: " + escJson(detail) + "\"}";
+        }
+        StringBuilder sb = new StringBuilder("{\"synced\":[");
+        for (int i = 0; i < synced.size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append("\"").append(escJson(synced.get(i))).append("\"");
+        }
+        sb.append("],\"count\":").append(synced.size()).append("}");
+        return sb.toString();
     }
 
     /* ---- Android API commands ---- */

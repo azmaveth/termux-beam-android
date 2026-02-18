@@ -913,7 +913,11 @@ public class PhoneAPI {
             "{\"cmd\":\"screen_scroll\",\"args\":\"<up|down|left|right> [id]\",\"desc\":\"Scroll container\"}," +
             "{\"cmd\":\"screen_wait\",\"args\":\"<text> [timeout_secs]\",\"desc\":\"Wait for UI element to appear\"}," +
             "{\"cmd\":\"screen_launch\",\"args\":\"<package>\",\"desc\":\"Launch app by package name\"}," +
-            "{\"cmd\":\"screen_node\",\"args\":\"<view_id>\",\"desc\":\"Get detailed node info by ID\"}" +
+            "{\"cmd\":\"screen_node\",\"args\":\"<view_id>\",\"desc\":\"Get detailed node info by ID\"}," +
+            "{\"cmd\":\"beam_eval\",\"args\":\"<erlang_expression>\",\"desc\":\"Evaluate Erlang expression on BEAM VM\"}," +
+            "{\"cmd\":\"beam_load\",\"args\":\"<module_name> <base64_beam>\",\"desc\":\"Load .beam module from base64 binary\"}," +
+            "{\"cmd\":\"beam_modules\",\"args\":\"\",\"desc\":\"List loaded BEAM modules\"}," +
+            "{\"cmd\":\"beam_sync\",\"args\":\"[module_name]\",\"desc\":\"Sync .beam files from /sdcard/.beam-modules/ to internal dir and load\"}" +
             "]";
     }
 }
