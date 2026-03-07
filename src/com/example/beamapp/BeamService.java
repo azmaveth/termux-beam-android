@@ -176,9 +176,9 @@ public class BeamService extends Service {
                         "    application:ensure_all_started(logger), " +
                         "    application:ensure_all_started(iex), " +
                         "    application:ensure_all_started(eex), " +
-                        "    application:load(jason), " +
+                        "    application:ensure_all_started(jason), " +
                         "    {ok, ElixirVsn} = application:get_key(elixir, vsn), " +
-                        "    io:format(\"Elixir ~s ready.~n\", [ElixirVsn]); " +
+                        "    io:format(\"Elixir ~s ready (logger, iex, eex, jason).~n\", [ElixirVsn]); " +
                         "  {error, ElixirErr} -> " +
                         "    io:format(\"FAILED: ~p~n\", [ElixirErr]) " +
                         "end, " +
