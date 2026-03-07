@@ -28,7 +28,7 @@
 -export([device_info/0, battery/0, vibrate/0, vibrate/1]).
 -export([toast/1, notify/2]).
 -export([clipboard_get/0, clipboard_set/1]).
--export([sensors/0, sensor_start/1, sensor_read/1, sensor_stop/1]).
+-export([sensors/0, sensor_list/0, sensor_start/1, sensor_read/1, sensor_stop/1]).
 -export([wifi_info/0, network_info/0, location/0]).
 -export([packages/0, system_prop/1, memory_info/0, screen_brightness/0]).
 -export([ping/0]).
@@ -102,6 +102,7 @@ clipboard_set(Text) when is_list(Text) -> clipboard_set(list_to_binary(Text)).
 %% ---- Sensors ----
 
 sensors() -> call(<<"sensors_list">>).
+sensor_list() -> call(<<"sensors_list">>).
 
 sensor_start(Type) -> call(<<"sensor_start">>, sensor_type(Type)).
 sensor_read(Type)  -> call(<<"sensor_read">>,  sensor_type(Type)).
