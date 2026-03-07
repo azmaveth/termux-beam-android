@@ -128,6 +128,12 @@ public class BeamService extends Service {
                     createSymlink(nativeLibDir + "/libepmd.so",
                                   ertsBin + "/epmd");
 
+                    /* Set up exqlite NIF priv directory */
+                    File exqlitePriv = new File(erlRoot, "lib/exqlite-0.35.0/priv");
+                    exqlitePriv.mkdirs();
+                    createSymlink(nativeLibDir + "/libsqlite3_nif.so",
+                                  exqlitePriv + "/sqlite3_nif.so");
+
                     String beamPath = nativeLibDir + "/libbeam_vm.so";
                     String rootDir = erlRoot.getAbsolutePath();
                     String binDir = ertsBin.getAbsolutePath();
@@ -177,8 +183,9 @@ public class BeamService extends Service {
                         "    application:ensure_all_started(iex), " +
                         "    application:ensure_all_started(eex), " +
                         "    application:ensure_all_started(jason), " +
+                        "    application:ensure_all_started(ecto_sqlite3), " +
                         "    {ok, ElixirVsn} = application:get_key(elixir, vsn), " +
-                        "    io:format(\"Elixir ~s ready (logger, iex, eex, jason).~n\", [ElixirVsn]); " +
+                        "    io:format(\"Elixir ~s ready (logger, iex, eex, jason, ecto_sqlite3).~n\", [ElixirVsn]); " +
                         "  {error, ElixirErr} -> " +
                         "    io:format(\"FAILED: ~p~n\", [ElixirErr]) " +
                         "end, " +
@@ -465,6 +472,13 @@ public class BeamService extends Service {
                     String iexEbin = libBase + "/iex-1.19.5/ebin";
                     String eexEbin = libBase + "/eex-1.19.5/ebin";
                     String jasonEbin = libBase + "/jason-1.4.4/ebin";
+                    String telemetryEbin = libBase + "/telemetry-1.4.0/ebin";
+                    String decimalEbin = libBase + "/decimal-2.3.0/ebin";
+                    String dbConnEbin = libBase + "/db_connection-2.9.0/ebin";
+                    String ectoEbin = libBase + "/ecto-3.13.5/ebin";
+                    String ectoSqlEbin = libBase + "/ecto_sql-3.13.5/ebin";
+                    String exqliteEbin = libBase + "/exqlite-0.35.0/ebin";
+                    String ectoSqlite3Ebin = libBase + "/ecto_sqlite3-0.22.0/ebin";
 
                     /* User module directory — drop .beam files here */
                     File modulesDir = new File(getFilesDir(), "beam-modules");
@@ -493,6 +507,13 @@ public class BeamService extends Service {
                     beamArgs.add("-pa"); beamArgs.add(iexEbin);
                     beamArgs.add("-pa"); beamArgs.add(eexEbin);
                     beamArgs.add("-pa"); beamArgs.add(jasonEbin);
+                    beamArgs.add("-pa"); beamArgs.add(telemetryEbin);
+                    beamArgs.add("-pa"); beamArgs.add(decimalEbin);
+                    beamArgs.add("-pa"); beamArgs.add(dbConnEbin);
+                    beamArgs.add("-pa"); beamArgs.add(ectoEbin);
+                    beamArgs.add("-pa"); beamArgs.add(ectoSqlEbin);
+                    beamArgs.add("-pa"); beamArgs.add(exqliteEbin);
+                    beamArgs.add("-pa"); beamArgs.add(ectoSqlite3Ebin);
                     beamArgs.add("-pa"); beamArgs.add(modulesPath);
                     beamArgs.add("-pa"); beamArgs.add("/sdcard/.beam-modules");
 
