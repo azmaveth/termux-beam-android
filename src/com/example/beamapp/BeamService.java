@@ -168,6 +168,21 @@ public class BeamService extends Service {
                         "    io:format(\"FAILED: ~p~n\", [Reason]) " +
                         "end, " +
 
+                        /* Start Elixir runtime */
+                        "io:format(\"Starting Elixir... \"), " +
+                        "case application:ensure_all_started(elixir) of " +
+                        "  {ok, ElixirStarted} -> " +
+                        "    io:format(\"ok (~p apps)~n\", [length(ElixirStarted)]), " +
+                        "    application:ensure_all_started(logger), " +
+                        "    application:ensure_all_started(iex), " +
+                        "    application:ensure_all_started(eex), " +
+                        "    application:load(jason), " +
+                        "    io:format(\"Elixir ~s ready.~n\", " +
+                        "      [application:get_key(elixir, vsn, <<\"?\">>)]); " +
+                        "  {error, ElixirErr} -> " +
+                        "    io:format(\"FAILED: ~p~n\", [ElixirErr]) " +
+                        "end, " +
+
                         /* Start android bridge */
                         "timer:sleep(500), " +
                         "io:format(\"~nConnecting to Android bridge...\"), " +
@@ -444,6 +459,13 @@ public class BeamService extends Service {
                     String publicKeyEbin = libBase + "/public_key-1.20.1/ebin";
                     String sslEbin = libBase + "/ssl-11.5.1/ebin";
 
+                    /* Elixir runtime code paths */
+                    String elixirEbin = libBase + "/elixir-1.19.5/ebin";
+                    String loggerEbin = libBase + "/logger-1.19.5/ebin";
+                    String iexEbin = libBase + "/iex-1.19.5/ebin";
+                    String eexEbin = libBase + "/eex-1.19.5/ebin";
+                    String jasonEbin = libBase + "/jason-1.4.4/ebin";
+
                     /* User module directory — drop .beam files here */
                     File modulesDir = new File(getFilesDir(), "beam-modules");
                     modulesDir.mkdirs();
@@ -466,6 +488,11 @@ public class BeamService extends Service {
                     beamArgs.add("-pa"); beamArgs.add(asn1Ebin);
                     beamArgs.add("-pa"); beamArgs.add(publicKeyEbin);
                     beamArgs.add("-pa"); beamArgs.add(sslEbin);
+                    beamArgs.add("-pa"); beamArgs.add(elixirEbin);
+                    beamArgs.add("-pa"); beamArgs.add(loggerEbin);
+                    beamArgs.add("-pa"); beamArgs.add(iexEbin);
+                    beamArgs.add("-pa"); beamArgs.add(eexEbin);
+                    beamArgs.add("-pa"); beamArgs.add(jasonEbin);
                     beamArgs.add("-pa"); beamArgs.add(modulesPath);
                     beamArgs.add("-pa"); beamArgs.add("/sdcard/.beam-modules");
 
