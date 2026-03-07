@@ -16,10 +16,14 @@ import android.util.Log;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 public class BeamService extends Service {
@@ -27,10 +31,13 @@ public class BeamService extends Service {
     private static final String CHANNEL_ID = "beam_service_channel";
     private static final int NOTIFICATION_ID = 1;
 
+    private static final String CONFIG_PATH = "/sdcard/.beam-config";
+
     private final IBinder binder = new LocalBinder();
     private Handler handler;
     private OutputCallback outputCallback;
     private Process beamProcess;
+    private Process epmdProcess;
     private OutputStream beamStdin;
     private volatile boolean isBeamRunning = false;
     private BridgeServer bridgeServer;
@@ -118,10 +125,29 @@ public class BeamService extends Service {
                                   ertsBin + "/erl_child_setup");
                     createSymlink(nativeLibDir + "/libinet_gethost.so",
                                   ertsBin + "/inet_gethost");
+                    createSymlink(nativeLibDir + "/libepmd.so",
+                                  ertsBin + "/epmd");
 
                     String beamPath = nativeLibDir + "/libbeam_vm.so";
                     String rootDir = erlRoot.getAbsolutePath();
                     String binDir = ertsBin.getAbsolutePath();
+
+                    /* Read distribution config */
+                    Map<String, String> config = readConfig();
+                    boolean distributed = "true".equals(config.get("distributed"));
+                    String nodeName = config.get("node_name");
+                    String cookie = config.get("cookie");
+                    String clusterNodes = config.get("cluster_nodes");
+
+                    if (distributed) {
+                        appendOutput("Distribution: " + nodeName + "\n");
+                        appendOutput("Cookie: " + cookie.substring(0, 3) + "***\n");
+                        if (!clusterNodes.isEmpty()) {
+                            appendOutput("Cluster: " + clusterNodes + "\n");
+                        }
+                        /* Start epmd before BEAM */
+                        startEpmd(binDir, libDir.getAbsolutePath(), nativeLibDir);
+                    }
 
                     /* Erlang boot: start android bridge, then command server */
                     String evalCode =
@@ -168,7 +194,48 @@ public class BeamService extends Service {
                         "io:format(\"  bt_gatt <addr>, bt_gatt_read <addr> <uuid>,~n\"), " +
                         "io:format(\"  bt_gatt_write <addr> <uuid> <hex>,~n\"), " +
                         "io:format(\"  bt_gatt_notify <addr> <uuid> [secs],~n\"), " +
-                        "io:format(\"  bt_rssi <addr>~n~n\"), " +
+                        "io:format(\"  bt_rssi <addr>~n\"), " +
+                        "io:format(\"  node, nodes, connect <n>, disconnect <n>,~n\"), " +
+                        "io:format(\"  rpc <node> <mod> <fun> [args...]~n~n\"), " +
+
+                        /* Show distribution status */
+                        "case node() of " +
+                        "  'nonode@nohost' -> " +
+                        "    io:format(\"Node: standalone (not distributed)~n\"); " +
+                        "  N -> " +
+                        "    io:format(\"Node: ~s~n\", [N]), " +
+                        "    io:format(\"Cookie: ~s~n\", [erlang:get_cookie()]) " +
+                        "end, " +
+
+                        /* Connect to cluster nodes */
+                        "ClusterStr = os:getenv(\"BEAM_CLUSTER_NODES\", \"\"), " +
+                        "case ClusterStr of " +
+                        "  \"\" -> io:format(\"No cluster nodes configured.~n\"); " +
+                        "  _ -> " +
+                        "    Nodes = [list_to_atom(string:trim(S)) " +
+                        "      || S <- string:split(ClusterStr, \",\", all), " +
+                        "         string:trim(S) =/= \"\"], " +
+                        "    lists:foreach(fun(Target) -> " +
+                        "      io:format(\"Connecting to ~s... \", [Target]), " +
+                        "      case net_adm:ping(Target) of " +
+                        "        pong -> io:format(\"connected!~n\"); " +
+                        "        pang -> io:format(\"unreachable (will retry in background)~n\"), " +
+                        "          spawn(fun() -> " +
+                        "            RetryConnect = fun Retry(N) when N > 0 -> " +
+                        "              timer:sleep(5000), " +
+                        "              case net_adm:ping(Target) of " +
+                        "                pong -> io:format(\"Connected to ~s!~n\", [Target]); " +
+                        "                pang -> Retry(N - 1) " +
+                        "              end; " +
+                        "            Retry(0) -> " +
+                        "              io:format(\"Failed to connect to ~s after retries~n\", [Target]) " +
+                        "            end, " +
+                        "            RetryConnect(60) " +
+                        "          end) " +
+                        "      end " +
+                        "    end, Nodes), " +
+                        "    io:format(\"Connected nodes: ~p~n\", [nodes()]) " +
+                        "end, " +
 
                         /* Start command TCP server on 9876 for interactive use */
                         "CmdPort = 9876, " +
@@ -266,6 +333,45 @@ public class BeamService extends Service {
                         "          <<\"bt_rssi \", RAddr/binary>> -> " +
                         "            android:call(<<\"bt_rssi\">>, RAddr, 10000); " +
 
+                        /* cluster commands */
+                        "          <<\"node\">> -> " +
+                        "            {ok, atom_to_binary(node(), utf8)}; " +
+                        "          <<\"nodes\">> -> " +
+                        "            Ns = [atom_to_binary(N2, utf8) || N2 <- nodes()], " +
+                        "            case Ns of " +
+                        "              [] -> {ok, <<\"(no connected nodes)\">>}; " +
+                        "              _ -> {ok, list_to_binary(lists:join(<<\", \">>, Ns))} " +
+                        "            end; " +
+                        "          <<\"connect \", Target/binary>> -> " +
+                        "            TAtom = list_to_atom(binary_to_list(string:trim(Target))), " +
+                        "            case net_adm:ping(TAtom) of " +
+                        "              pong -> {ok, <<\"connected to \", Target/binary>>}; " +
+                        "              pang -> {error, <<\"could not reach \", Target/binary>>} " +
+                        "            end; " +
+                        "          <<\"rpc \", RpcArgs/binary>> -> " +
+                        "            case binary:split(string:trim(RpcArgs), <<\" \">>, [global]) of " +
+                        "              [RNode, RMod, RFun | RFArgs] -> " +
+                        "                RNodeA = list_to_atom(binary_to_list(RNode)), " +
+                        "                RModA = list_to_atom(binary_to_list(RMod)), " +
+                        "                RFunA = list_to_atom(binary_to_list(RFun)), " +
+                        "                ParsedArgs = [begin " +
+                        "                  {ok, Ts, _} = erl_scan:string(binary_to_list(<<A/binary, \".\">>)), " +
+                        "                  {ok, [T]} = erl_parse:parse_exprs(Ts), " +
+                        "                  {value, V, _} = erl_eval:exprs([T], []), V " +
+                        "                end || A <- RFArgs], " +
+                        "                case rpc:call(RNodeA, RModA, RFunA, ParsedArgs, 10000) of " +
+                        "                  {badrpc, RpcErr} -> " +
+                        "                    {error, list_to_binary(io_lib:format(\"~p\", [RpcErr]))}; " +
+                        "                  RpcResult -> " +
+                        "                    {ok, list_to_binary(io_lib:format(\"~p\", [RpcResult]))} " +
+                        "                end; " +
+                        "              _ -> {error, <<\"usage: rpc <node> <mod> <fun> [args...]\">>} " +
+                        "            end; " +
+                        "          <<\"disconnect \", DNode/binary>> -> " +
+                        "            DAtom = list_to_atom(binary_to_list(string:trim(DNode))), " +
+                        "            erlang:disconnect_node(DAtom), " +
+                        "            {ok, <<\"disconnected \", DNode/binary>>}; " +
+
                         /* eval — run arbitrary Erlang expression */
                         "          <<\"eval \", Expr/binary>> -> " +
                         "            {ok, Tokens, _} = erl_scan:string(binary_to_list(Expr)), " +
@@ -298,7 +404,8 @@ public class BeamService extends Service {
                         "            \". Try: device battery memory wifi sensors eval <expr> \" " +
                         "            \"load_module <name> <base64> modules \" " +
                         "            \"say <text> listen [secs] stream_listen [secs] \" " +
-                        "            \"bt_status bt_scan [secs] bt_scan_ble [secs]\">>} " +
+                        "            \"bt_status bt_scan [secs] bt_scan_ble [secs] \" " +
+                        "            \"node nodes connect <n> disconnect <n> rpc <n> <m> <f> [args]\">>} " +
                         "        end " +
                         "      catch E:R -> {error, list_to_binary(io_lib:format(\"~p:~p\", [E,R]))} " +
                         "      end, " +
@@ -347,21 +454,29 @@ public class BeamService extends Service {
                     appendOutput("Modules: " + modulesPath + "\n");
                     appendOutput("Modules: /sdcard/.beam-modules/\n");
 
-                    ProcessBuilder pb = new ProcessBuilder(
-                        beamPath,
-                        "--", "-root", rootDir,
-                        "-bindir", binDir,
-                        "-boot", "start_clean",
-                        "-noshell",
-                        "-pa", androidEbin,
-                        "-pa", cryptoEbin,
-                        "-pa", asn1Ebin,
-                        "-pa", publicKeyEbin,
-                        "-pa", sslEbin,
-                        "-pa", modulesPath,
-                        "-pa", "/sdcard/.beam-modules",
-                        "-eval", evalCode
-                    );
+                    List<String> beamArgs = new ArrayList<>();
+                    beamArgs.add(beamPath);
+                    beamArgs.add("--");
+                    beamArgs.add("-root"); beamArgs.add(rootDir);
+                    beamArgs.add("-bindir"); beamArgs.add(binDir);
+                    beamArgs.add("-boot"); beamArgs.add("start_clean");
+                    beamArgs.add("-noshell");
+                    beamArgs.add("-pa"); beamArgs.add(androidEbin);
+                    beamArgs.add("-pa"); beamArgs.add(cryptoEbin);
+                    beamArgs.add("-pa"); beamArgs.add(asn1Ebin);
+                    beamArgs.add("-pa"); beamArgs.add(publicKeyEbin);
+                    beamArgs.add("-pa"); beamArgs.add(sslEbin);
+                    beamArgs.add("-pa"); beamArgs.add(modulesPath);
+                    beamArgs.add("-pa"); beamArgs.add("/sdcard/.beam-modules");
+
+                    if (distributed) {
+                        beamArgs.add("-name"); beamArgs.add(nodeName);
+                        beamArgs.add("-setcookie"); beamArgs.add(cookie);
+                    }
+
+                    beamArgs.add("-eval"); beamArgs.add(evalCode);
+
+                    ProcessBuilder pb = new ProcessBuilder(beamArgs);
 
                     Map<String, String> env = pb.environment();
                     env.put("HOME", getFilesDir().getAbsolutePath());
@@ -370,6 +485,9 @@ public class BeamService extends Service {
                     env.put("ROOTDIR", rootDir);
                     env.put("BINDIR", binDir);
                     env.put("PROGNAME", "erl");
+                    if (distributed && !clusterNodes.isEmpty()) {
+                        env.put("BEAM_CLUSTER_NODES", clusterNodes);
+                    }
                     /* LD_LIBRARY_PATH: our symlink dir + native lib dir + system */
                     env.put("LD_LIBRARY_PATH",
                         libDir + ":" + nativeLibDir + ":/system/lib64");
@@ -417,10 +535,76 @@ public class BeamService extends Service {
             notifyStatus(false);
             appendOutput("BEAM stopped by user.\n");
         }
+        /* Kill epmd - it runs as a daemon */
+        try {
+            Runtime.getRuntime().exec(new String[]{"pkill", "-f", "epmd"}).waitFor();
+        } catch (Exception e) {
+            /* ignore */
+        }
     }
 
     public boolean isBeamRunning() {
         return isBeamRunning;
+    }
+
+    private Map<String, String> readConfig() {
+        Map<String, String> config = new HashMap<>();
+        /* Defaults */
+        config.put("node_name", "beamapp@10.42.43.2");
+        config.put("cookie", "beamapp_secret");
+        config.put("cluster_nodes", "");
+        config.put("distributed", "true");
+
+        File configFile = new File(CONFIG_PATH);
+        if (configFile.exists()) {
+            try (BufferedReader br = new BufferedReader(new FileReader(configFile))) {
+                String line;
+                while ((line = br.readLine()) != null) {
+                    line = line.trim();
+                    if (line.isEmpty() || line.startsWith("#")) continue;
+                    int eq = line.indexOf('=');
+                    if (eq > 0) {
+                        config.put(line.substring(0, eq).trim(),
+                                   line.substring(eq + 1).trim());
+                    }
+                }
+            } catch (IOException e) {
+                Log.w(TAG, "Could not read config: " + e.getMessage());
+            }
+        } else {
+            /* Write default config file */
+            try (FileOutputStream fos = new FileOutputStream(configFile)) {
+                fos.write(("# BeamApp Distributed Erlang Configuration\n" +
+                    "# Edit this file and restart the app to apply changes.\n\n" +
+                    "# Set to false to run as standalone (non-distributed) node\n" +
+                    "distributed=true\n\n" +
+                    "# Node name (long name format: name@ip)\n" +
+                    "node_name=beamapp@10.42.43.2\n\n" +
+                    "# Erlang distribution cookie (must match on all nodes)\n" +
+                    "cookie=beamapp_secret\n\n" +
+                    "# Comma-separated list of nodes to connect to on startup\n" +
+                    "cluster_nodes=arbor_core@10.42.43.4\n").getBytes());
+            } catch (IOException e) {
+                Log.w(TAG, "Could not write default config: " + e.getMessage());
+            }
+        }
+        return config;
+    }
+
+    private void startEpmd(String binDir, String libDir, String nativeLibDir) {
+        try {
+            String epmdPath = binDir + "/epmd";
+            ProcessBuilder epb = new ProcessBuilder(epmdPath, "-daemon");
+            Map<String, String> env = epb.environment();
+            env.put("LD_LIBRARY_PATH",
+                libDir + ":" + nativeLibDir + ":/system/lib64");
+            epmdProcess = epb.start();
+            epmdProcess.waitFor();
+            appendOutput("epmd started.\n");
+        } catch (Exception e) {
+            Log.w(TAG, "epmd start failed: " + e.getMessage());
+            appendOutput("Warning: epmd start failed: " + e.getMessage() + "\n");
+        }
     }
 
     private void createSymlink(String target, String link) {
