@@ -5,13 +5,38 @@ set -ex
 
 PROJECT="/data/data/com.termux/files/home/BeamApp"
 ERLROOT="/data/data/com.termux/files/usr/lib/erlang"
-ERTS="$ERLROOT/erts-16.2"
 LIBDIR="$PROJECT/build/lib/arm64-v8a"
 ASSETS="$PROJECT/assets/erlang"
 
-# Clean
-rm -rf "$LIBDIR" "$ASSETS"
+# === Auto-detect installed OTP component versions ===
+# Picks up whatever Termux currently has, so `pkg upgrade erlang` is enough
+# to update — no manual edits to this script.
+detect_one() {
+    local pattern="$1"
+    local found
+    found=$(ls -d "$ERLROOT"/$pattern 2>/dev/null | sort -V | tail -1)
+    [[ -n "$found" ]] || { echo "ERROR: no match for $pattern in $ERLROOT" >&2; exit 1; }
+    basename "$found"
+}
+
+ERTS_DIR=$(detect_one "erts-*")
+KERNEL_DIR=$(detect_one "lib/kernel-*")
+STDLIB_DIR=$(detect_one "lib/stdlib-*")
+COMPILER_DIR=$(detect_one "lib/compiler-*")
+ERTS_VERSION="${ERTS_DIR#erts-}"
+ERTS="$ERLROOT/$ERTS_DIR"
+
+echo "Detected: $ERTS_DIR / $KERNEL_DIR / $STDLIB_DIR / $COMPILER_DIR"
+
+# Clean only what this script manages — leave hex deps (elixir, ecto, exqlite, ...)
+# and the libsqlite3_nif.so (managed by update_elixir_deps.sh) in place.
 mkdir -p "$LIBDIR" "$ASSETS/bin" "$ASSETS/lib"
+rm -f "$ASSETS/erts_version"
+rm -rf "$ASSETS/lib/android"
+# Remove any stale kernel/stdlib/compiler dirs from previous OTP versions
+for stale in "$ASSETS/lib/kernel-"* "$ASSETS/lib/stdlib-"* "$ASSETS/lib/compiler-"*; do
+    [[ -d "$stale" ]] && rm -rf "$stale"
+done
 
 # === Native libraries (lib/arm64-v8a with lib*.so naming) ===
 # beam.smp - the VM itself
@@ -22,11 +47,17 @@ cp "$ERTS/bin/erlexec" "$LIBDIR/liberlexec.so"
 cp "$ERTS/bin/erl_child_setup" "$LIBDIR/liberl_child_setup.so"
 # inet helper
 cp "$ERTS/bin/inet_gethost" "$LIBDIR/libinet_gethost.so"
+# epmd — required for Erlang distribution
+cp "$ERTS/bin/epmd" "$LIBDIR/libepmd.so"
 
 # Dependent shared libraries
-cp "/data/data/com.termux/files/usr/lib/libncursesw.so.6.6" "$LIBDIR/libncursesw_compat.so"
-cp "/data/data/com.termux/files/usr/lib/libz.so.1.3.1" "$LIBDIR/libz_compat.so"
-cp "/data/data/com.termux/files/usr/lib/libc++_shared.so" "$LIBDIR/libc++_shared.so"
+# Resolve via the unversioned symlink so we always get whatever Termux has
+cp -L "/data/data/com.termux/files/usr/lib/libncursesw.so.6" "$LIBDIR/libncursesw_compat.so"
+cp -L "/data/data/com.termux/files/usr/lib/libz.so.1"        "$LIBDIR/libz_compat.so"
+cp    "/data/data/com.termux/files/usr/lib/libc++_shared.so" "$LIBDIR/libc++_shared.so"
+# OpenSSL — needed by crypto/ssl NIFs. Android requires lib*.so naming.
+cp -L "/data/data/com.termux/files/usr/lib/libcrypto.so.3"   "$LIBDIR/libcrypto3.so"
+cp -L "/data/data/com.termux/files/usr/lib/libssl.so.3"      "$LIBDIR/libssl3.so"
 
 # === Sherpa-onnx JNI (native speech engine) ===
 SHERPA_HOME="/data/data/com.termux/files/home/sherpa-onnx"
@@ -91,24 +122,19 @@ cp "/data/data/com.termux/files/home/sherpa-models/3dspeaker_speech_campplus_sv_
 cp "$ERLROOT/bin/start_clean.boot" "$ASSETS/bin/"
 cp "$ERLROOT/bin/no_dot_erlang.boot" "$ASSETS/bin/"
 
-# === Minimal OTP libraries (kernel + stdlib only) ===
-# Copy kernel .beam files
-mkdir -p "$ASSETS/lib/kernel-10.5/ebin"
-cp "$ERLROOT/lib/kernel-10.5/ebin/"*.beam "$ASSETS/lib/kernel-10.5/ebin/"
-cp "$ERLROOT/lib/kernel-10.5/ebin/"*.app "$ASSETS/lib/kernel-10.5/ebin/"
-
-# Copy stdlib .beam files
-mkdir -p "$ASSETS/lib/stdlib-7.2/ebin"
-cp "$ERLROOT/lib/stdlib-7.2/ebin/"*.beam "$ASSETS/lib/stdlib-7.2/ebin/"
-cp "$ERLROOT/lib/stdlib-7.2/ebin/"*.app "$ASSETS/lib/stdlib-7.2/ebin/"
-
-# Copy compiler (needed for some eval operations)
-mkdir -p "$ASSETS/lib/compiler-9.0.4/ebin"
-cp "$ERLROOT/lib/compiler-9.0.4/ebin/"*.beam "$ASSETS/lib/compiler-9.0.4/ebin/"
-cp "$ERLROOT/lib/compiler-9.0.4/ebin/"*.app "$ASSETS/lib/compiler-9.0.4/ebin/"
+# === Minimal OTP libraries (kernel + stdlib + compiler) ===
+copy_otp_lib() {
+    local dir="$1"
+    mkdir -p "$ASSETS/lib/$dir/ebin"
+    cp "$ERLROOT/lib/$dir/ebin/"*.beam "$ASSETS/lib/$dir/ebin/"
+    cp "$ERLROOT/lib/$dir/ebin/"*.app  "$ASSETS/lib/$dir/ebin/"
+}
+copy_otp_lib "$KERNEL_DIR"
+copy_otp_lib "$STDLIB_DIR"
+copy_otp_lib "$COMPILER_DIR"
 
 # Copy ERTS version file
-echo "16.2" > "$ASSETS/erts_version"
+echo "$ERTS_VERSION" > "$ASSETS/erts_version"
 
 # === Compile Erlang bridge modules ===
 mkdir -p "$ASSETS/lib/android/ebin"

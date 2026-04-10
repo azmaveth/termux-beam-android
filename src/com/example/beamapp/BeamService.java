@@ -129,7 +129,7 @@ public class BeamService extends Service {
                                   ertsBin + "/epmd");
 
                     /* Set up exqlite NIF priv directory */
-                    File exqlitePriv = new File(erlRoot, "lib/exqlite-0.35.0/priv");
+                    File exqlitePriv = new File(erlRoot, "lib/exqlite-0.36.0/priv");
                     exqlitePriv.mkdirs();
                     createSymlink(nativeLibDir + "/libsqlite3_nif.so",
                                   exqlitePriv + "/sqlite3_nif.so");
@@ -477,7 +477,7 @@ public class BeamService extends Service {
                     String dbConnEbin = libBase + "/db_connection-2.9.0/ebin";
                     String ectoEbin = libBase + "/ecto-3.13.5/ebin";
                     String ectoSqlEbin = libBase + "/ecto_sql-3.13.5/ebin";
-                    String exqliteEbin = libBase + "/exqlite-0.35.0/ebin";
+                    String exqliteEbin = libBase + "/exqlite-0.36.0/ebin";
                     String ectoSqlite3Ebin = libBase + "/ecto_sqlite3-0.22.0/ebin";
 
                     /* User module directory — drop .beam files here */
