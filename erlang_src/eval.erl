@@ -17,7 +17,7 @@
 %%%
 %%% Results are saved as JSON to /sdcard/.beam-evals/<timestamp>.json
 -module(eval).
--export([run_all/0, run/1]).
+-export([run_all/0, run/1, decode_json/1]).
 
 -define(EVAL_DIR, "/sdcard/.beam-evals").
 -define(TMP_DIR,  "/sdcard/.beam-evals/tmp").
@@ -75,7 +75,7 @@ run_tts_eval() ->
                 Chars = length(Text),
                 CharsPerSec = Chars * 1000.0 / max(1, GenMs),
                 RTF = GenMs / max(1, Duration * 1000),
-                io:format("~.0fms gen, ~.1fs audio, ~.0f chars/s~n",
+                io:format("~pms gen, ~.1fs audio, ~.1f chars/s~n",
                           [GenMs, Duration, CharsPerSec]),
                 #{<<"label">>     => list_to_binary(Label),
                   <<"chars">>     => Chars,
@@ -129,7 +129,7 @@ run_stt_eval() ->
                     {ok, #{<<"text">> := SttText} = SttR} ->
                         SttMs = erlang:monotonic_time(millisecond) - T0,
                         RTF = SttMs / max(1, AudioDur * 1000),
-                        io:format("~.0fms (RTF ~.3f)~n", [SttMs, RTF]),
+                        io:format("~pms (RTF ~.3f)~n", [SttMs, RTF]),
                         #{<<"label">>   => list_to_binary(Label),
                           <<"ref">>     => list_to_binary(Text),
                           <<"hyp">>     => SttText,
@@ -244,7 +244,7 @@ run_gemma_eval_loaded() ->
                 Tokens = length(string:tokens(binary_to_list(Text), " \t\n")),
                 TokPerSec = Tokens * 1000.0 / max(1, ElapsedMs),
                 io:format("~p tok in ~.1fs (~.1f tok/s)~n",
-                          [Tokens, ElapsedMs / 1000, TokPerSec]),
+                          [Tokens, ElapsedMs / 1.0 / 1000, TokPerSec]),
                 #{<<"label">>       => list_to_binary(Label),
                   <<"prompt">>      => list_to_binary(Prompt),
                   <<"response">>    => Text,
@@ -349,7 +349,7 @@ safe_call(Cmd) ->
 %% into maps. android.erl's parse_value returns raw binary strings for
 %% objects, so we need to parse them here.
 call(Cmd, Args, Timeout) ->
-    case call(Cmd, Args, Timeout) of
+    case android:call(Cmd, Args, Timeout) of
         {ok, Bin} when is_binary(Bin) ->
             case decode_json(Bin) of
                 {ok, Map} when is_map(Map) -> {ok, Map};

@@ -2370,12 +2370,19 @@ public class BridgeServer {
 
         char c = json.charAt(start);
         if (c == '"') {
-            /* String value */
+            /* String value — find closing quote, then unescape */
             int end = json.indexOf('"', start + 1);
             while (end > 0 && json.charAt(end - 1) == '\\') {
                 end = json.indexOf('"', end + 1);
             }
-            return json.substring(start + 1, end);
+            String raw = json.substring(start + 1, end);
+            /* Unescape standard JSON escapes */
+            return raw.replace("\\\"", "\"")
+                      .replace("\\\\", "\\")
+                      .replace("\\n", "\n")
+                      .replace("\\r", "\r")
+                      .replace("\\t", "\t")
+                      .replace("\\/", "/");
         } else if (c == '[') {
             /* Array — find matching bracket */
             int depth = 1;
