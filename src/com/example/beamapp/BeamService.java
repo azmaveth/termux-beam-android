@@ -520,6 +520,8 @@ public class BeamService extends Service {
                     if (distributed) {
                         beamArgs.add("-name"); beamArgs.add(nodeName);
                         beamArgs.add("-setcookie"); beamArgs.add(cookie);
+                        beamArgs.add("-kernel"); beamArgs.add("net_ticktime");
+                        beamArgs.add("120");
                     }
 
                     beamArgs.add("-eval"); beamArgs.add(evalCode);
