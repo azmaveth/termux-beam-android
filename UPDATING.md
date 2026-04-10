@@ -14,6 +14,7 @@ The BeamApp APK ships its own self-contained BEAM environment:
 | Elixir + hex deps (`ecto`, `exqlite`, ...) | Built via a temporary mix project | `update_elixir_deps.sh` |
 | `sqlite3_nif.so` | Built by `mix deps.compile exqlite` | `update_elixir_deps.sh` copies to `build/lib/arm64-v8a/libsqlite3_nif.so`; `BeamService.java` symlinks it into `lib/exqlite-<ver>/priv/sqlite3_nif.so` at boot |
 | Custom Erlang modules (`android.erl`, `speech.erl`) | This repo | Compiled by `prepare_assets.sh` |
+| LiteRT-LM (Gemma 4 runtime) + Kotlin stdlib/coroutines/gson | Google Maven + Maven Central | `download_litertlm.sh` fetches AARs/JARs, stages `classes.jar`s into `build/litertlm/classpath/` and `liblitertlm_jni.so` into `build/lib/arm64-v8a/` |
 
 Termux runs natively on Android with the NDK toolchain, so anything Termux compiles
 (including `mix deps.compile`) produces ARM64 Android binaries automatically — no
@@ -26,6 +27,8 @@ cross-compile needed.
   to edit when OTP upgrades.
 - **Hex deps** — the `DEPS` array near the top of `update_elixir_deps.sh`. Bump
   versions there.
+- **LiteRT-LM / Kotlin deps** — the `PKGS` array near the top of
+  `download_litertlm.sh`. Bump versions there.
 
 ## How to Update
 
@@ -126,6 +129,38 @@ Then rebuild and install:
 - **`asn1`, `crypto`, `ssl`, `public_key` OTP apps** are committed in `assets/erlang/lib/`
   but also not refreshed by `prepare_assets.sh`. Same caveat.
 - **Cluster setup scripts** (`cluster/`) are unrelated and don't need updating.
+
+### Update LiteRT-LM or its Kotlin deps
+
+1. Edit `download_litertlm.sh` and bump versions in the `PKGS` array. The format is:
+   ```
+   "repo  group  artifact  version  ext"
+   ```
+   where `repo` is `google` (for Google Maven) or `central` (for Maven Central),
+   and `ext` is `jar` or `aar`.
+2. Run:
+   ```bash
+   ./download_litertlm.sh
+   ./build.sh
+   ```
+
+The script re-downloads only missing files (cached in `/tmp/litertlm_fetch`),
+cleans old jars out of `build/litertlm/classpath/`, and restages everything fresh.
+`build.sh` auto-picks up all `*.jar` files in `build/litertlm/classpath/` for both
+the javac classpath and the d8 dex step.
+
+**What LiteRT-LM gives you:** the same Kotlin runtime that Google's Edge Gallery
+app ships with, so BeamApp can load `.litertlm` model files (Gemma 4 and others
+from HuggingFace `litert-community`) and run on-device LLM inference. The Java
+entry points you'll most likely use are `com.google.ai.edge.litertlm.Engine`,
+`EngineConfig`, `Conversation.sendMessageAsync(...)`, and `ResponseCallback`.
+See Gallery's `LlmChatModelHelper.kt` for a reference implementation to port.
+
+**Current dep closure** (approximate sizes after d8):
+- litertlm-android — 116 KB of Kotlin classes + 20 MB `liblitertlm_jni.so`
+- kotlin-stdlib + kotlin-reflect — ~5 MB of classes
+- kotlinx-coroutines core + android — ~1.4 MB
+- gson — 284 KB
 
 ### Safety note
 

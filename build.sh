@@ -31,9 +31,16 @@ aapt2 link \
 echo "=== Step 3: Compile Java ==="
 # Collect all sherpa-onnx Java API source files
 SHERPA_JAVA=$(find "$PROJECT/src/com/k2fsa" -name "*.java" 2>/dev/null)
+# LiteRT-LM + Kotlin/Coroutines classpath (staged by download_litertlm.sh)
+LITERTLM_CP=""
+if [[ -d "$BUILD/litertlm/classpath" ]]; then
+    for jar in "$BUILD/litertlm/classpath"/*.jar; do
+        [[ -f "$jar" ]] && LITERTLM_CP="$LITERTLM_CP:$jar"
+    done
+fi
 javac \
     -source 11 -target 11 \
-    -classpath "$ANDROID_JAR" \
+    -classpath "$ANDROID_JAR$LITERTLM_CP" \
     -d "$OBJ" \
     "$GEN/com/example/beamapp/R.java" \
     $SHERPA_JAVA \
@@ -45,12 +52,26 @@ javac \
     "$PROJECT/src/com/example/beamapp/BootReceiver.java" \
     "$PROJECT/src/com/example/beamapp/BeamService.java" \
     "$PROJECT/src/com/example/beamapp/ConfigActivity.java" \
+    "$PROJECT/src/com/example/beamapp/GemmaEngine.java" \
     "$PROJECT/src/com/example/beamapp/MainActivity.java"
 
 echo "=== Step 4: DEX ==="
-# Collect all .class files from both packages
+# Dex both our compiled classes AND the LiteRT-LM/Kotlin library jars, so all
+# of their classes land in classes.dex. d8 accepts a mix of .class files and
+# .jar inputs and dedupes sensibly.
 find "$OBJ" -name "*.class" > "$BUILD/classlist.txt"
-java -cp /data/data/com.termux/files/home/tools/r8.jar com.android.tools.r8.D8 --min-api 26 --output "$BUILD/" $(cat "$BUILD/classlist.txt")
+LITERTLM_JARS=""
+if [[ -d "$BUILD/litertlm/classpath" ]]; then
+    for jar in "$BUILD/litertlm/classpath"/*.jar; do
+        [[ -f "$jar" ]] && LITERTLM_JARS="$LITERTLM_JARS $jar"
+    done
+fi
+java -cp /data/data/com.termux/files/home/tools/r8.jar com.android.tools.r8.D8 \
+    --min-api 26 \
+    --lib "$ANDROID_JAR" \
+    --output "$BUILD/" \
+    $(cat "$BUILD/classlist.txt") \
+    $LITERTLM_JARS
 
 echo "=== Step 5: Package APK ==="
 cp "$APK_DIR/beamapp-unsigned.apk" "$APK_DIR/beamapp-tmp.apk"

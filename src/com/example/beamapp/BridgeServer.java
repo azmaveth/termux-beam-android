@@ -114,6 +114,9 @@ public class BridgeServer {
     /* Phone API (camera, media, files, etc.) */
     private PhoneAPI phoneAPI;
 
+    /* LiteRT-LM / Gemma on-device inference */
+    private GemmaEngine gemmaEngine;
+
     public BridgeServer(Context context) {
         this.context = context;
         this.sensorManager = (SensorManager) context.getSystemService(Context.SENSOR_SERVICE);
@@ -131,6 +134,7 @@ public class BridgeServer {
         }, "speech-init").start();
         buddieService = new BuddieService(context, btAdapter, speechEngine);
         phoneAPI = new PhoneAPI(context);
+        gemmaEngine = new GemmaEngine(context);
     }
 
     public void start() {
@@ -267,6 +271,12 @@ public class BridgeServer {
                 case "speech_status":  result = speechEngine.getStatus(); break;
                 case "transcribe_offline": result = cmdTranscribeOffline(args); break;
                 case "diarize":        result = cmdDiarize(args); break;
+                case "gemma_load":     result = cmdGemmaLoad(args); break;
+                case "gemma_generate": result = cmdGemmaGenerate(args); break;
+                case "gemma_stream":   result = cmdGemmaStream(args, id, out); break;
+                case "gemma_unload":   result = cmdGemmaUnload(); break;
+                case "gemma_status":   result = cmdGemmaStatus(); break;
+                case "gemma_cancel":   gemmaEngine.cancel(); result = "\"ok\""; break;
                 case "services":       result = cmdServices(); break;
                 case "features":       result = cmdFeatures(); break;
                 case "shell":          result = cmdShell(args); break;
@@ -1065,6 +1075,146 @@ public class BridgeServer {
         if (!wavFile.exists()) return "\"file not found: " + escJson(wavPath) + "\"";
         if (!speechEngine.isDiarizationReady()) return "\"diarization not ready\"";
         return speechEngine.diarize(wavPath);
+    }
+
+    /* ---- Gemma / LiteRT-LM commands ---- */
+
+    /**
+     * Load a .litertlm model file (e.g. Gemma 4 from HuggingFace litert-community).
+     * Args: model file path (quoted).
+     * Blocking — initialization can take several seconds.
+     */
+    private String cmdGemmaLoad(String args) {
+        String path = unquote(args).trim();
+        if (path.isEmpty()) {
+            return "{\"error\":\"usage: gemma_load <path>\"}";
+        }
+        try {
+            gemmaEngine.load(path);
+            GemmaEngine.Status s = gemmaEngine.status();
+            return "{\"loaded\":true,\"model_path\":\""
+                + escJson(s.modelPath) + "\",\"loaded_at\":" + s.loadedAt + "}";
+        } catch (Throwable t) {
+            return "{\"error\":\"" + escJson(t.getMessage()) + "\"}";
+        }
+    }
+
+    /**
+     * Blocking generation. Args: prompt (quoted). Returns generated text.
+     */
+    private String cmdGemmaGenerate(String args) {
+        String prompt = unquote(args);
+        if (prompt.isEmpty()) {
+            return "{\"error\":\"usage: gemma_generate <prompt>\"}";
+        }
+        if (!gemmaEngine.isLoaded()) {
+            return "{\"error\":\"no model loaded — call gemma_load first\"}";
+        }
+        try {
+            long t0 = System.currentTimeMillis();
+            String text = gemmaEngine.generate(prompt);
+            long elapsed = System.currentTimeMillis() - t0;
+            return "{\"text\":\"" + escJson(text) + "\",\"elapsed_ms\":" + elapsed + "}";
+        } catch (Throwable t) {
+            return "{\"error\":\"" + escJson(t.getMessage()) + "\"}";
+        }
+    }
+
+    /**
+     * Streaming generation. Sends partials as JSON lines with
+     * {"id":ID,"partial":true,"text":"<chunk>"} and a final
+     * {"id":ID,"ok":true,"data":{"text":"<full>","elapsed_ms":N}}.
+     *
+     * Mirrors cmdStreamListen's protocol so the BEAM side can parse both the
+     * same way. Returns null to tell the dispatcher not to wrap our response.
+     */
+    private String cmdGemmaStream(String args, final String msgId, final PrintWriter writer) {
+        String prompt = unquote(args);
+        if (prompt.isEmpty()) {
+            return "{\"error\":\"usage: gemma_stream <prompt>\"}";
+        }
+        if (!gemmaEngine.isLoaded()) {
+            return "{\"error\":\"no model loaded — call gemma_load first\"}";
+        }
+        if (writer == null) {
+            /* No writer to stream through — fall back to blocking. */
+            return cmdGemmaGenerate(args);
+        }
+
+        final StringBuilder full = new StringBuilder();
+        final long t0 = System.currentTimeMillis();
+        final boolean[] errored = {false};
+
+        try {
+            gemmaEngine.streamGenerate(prompt, new GemmaEngine.StreamListener() {
+                @Override
+                public void onToken(String chunk) {
+                    full.append(chunk);
+                    String partial = "{\"id\":" + msgId
+                        + ",\"partial\":true,\"text\":\""
+                        + escJson(chunk) + "\"}";
+                    synchronized (writer) {
+                        writer.println(partial);
+                        writer.flush();
+                    }
+                }
+
+                @Override
+                public void onDone() { /* handled below */ }
+
+                @Override
+                public void onError(Throwable error) {
+                    errored[0] = true;
+                    String errLine = "{\"id\":" + msgId
+                        + ",\"ok\":false,\"error\":\""
+                        + escJson(error.getMessage()) + "\"}";
+                    synchronized (writer) {
+                        writer.println(errLine);
+                        writer.flush();
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            String errLine = "{\"id\":" + msgId
+                + ",\"ok\":false,\"error\":\""
+                + escJson(t.getMessage()) + "\"}";
+            synchronized (writer) {
+                writer.println(errLine);
+                writer.flush();
+            }
+            return null;
+        }
+
+        if (!errored[0]) {
+            long elapsed = System.currentTimeMillis() - t0;
+            String finalResponse = "{\"id\":" + msgId
+                + ",\"ok\":true,\"data\":{\"text\":\""
+                + escJson(full.toString()) + "\",\"elapsed_ms\":" + elapsed + "}}";
+            synchronized (writer) {
+                writer.println(finalResponse);
+                writer.flush();
+            }
+        }
+        return null;
+    }
+
+    private String cmdGemmaUnload() {
+        gemmaEngine.unload();
+        return "{\"loaded\":false}";
+    }
+
+    private String cmdGemmaStatus() {
+        GemmaEngine.Status s = gemmaEngine.status();
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"loaded\":").append(s.loaded);
+        if (s.modelPath != null) {
+            sb.append(",\"model_path\":\"").append(escJson(s.modelPath)).append("\"");
+        }
+        if (s.loadedAt > 0) {
+            sb.append(",\"loaded_at\":").append(s.loadedAt);
+        }
+        sb.append("}");
+        return sb.toString();
     }
 
     /* ---- Buddie earbuds commands ---- */
