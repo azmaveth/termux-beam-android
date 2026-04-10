@@ -69,7 +69,7 @@ run_tts_eval() ->
     Results = lists:map(fun({Label, Text}) ->
         io:format("[eval:tts]   ~s... ", [Label]),
         T0 = erlang:monotonic_time(millisecond),
-        case android:call(<<"tts">>, list_to_binary(Text), 30000) of
+        case call(<<"tts">>, list_to_binary(Text), 30000) of
             {ok, #{<<"gen_ms">> := GenMs, <<"duration">> := Duration} = R} ->
                 Wall = erlang:monotonic_time(millisecond) - T0,
                 Chars = length(Text),
@@ -125,7 +125,7 @@ run_stt_eval() ->
             {ok, #{<<"duration">> := AudioDur}} ->
                 io:format("transcribing... "),
                 T0 = erlang:monotonic_time(millisecond),
-                case android:call(<<"stt">>, list_to_binary(WavPath), 60000) of
+                case call(<<"stt">>, list_to_binary(WavPath), 60000) of
                     {ok, #{<<"text">> := SttText} = SttR} ->
                         SttMs = erlang:monotonic_time(millisecond) - T0,
                         RTF = SttMs / max(1, AudioDur * 1000),
@@ -177,7 +177,7 @@ run_roundtrip_eval() ->
         io:format("[eval:roundtrip]   ~s: ", [Label]),
         case tts_to_file(WavPath, Text) of
             {ok, _} ->
-                case android:call(<<"stt">>, list_to_binary(WavPath), 60000) of
+                case call(<<"stt">>, list_to_binary(WavPath), 60000) of
                     {ok, #{<<"text">> := Hyp}} ->
                         WER = word_error_rate(Text, binary_to_list(Hyp)),
                         io:format("WER=~.1f%~n", [WER * 100]),
@@ -332,7 +332,7 @@ capture_system_snapshot() ->
 
 tts_to_file(WavPath, Text) ->
     Args = list_to_binary(WavPath ++ " " ++ Text),
-    case android:call(<<"tts_file">>, Args, 30000) of
+    case call(<<"tts_file">>, Args, 30000) of
         {ok, #{<<"status">> := <<"ok">>} = R} -> {ok, R};
         {ok, #{<<"error">> := Err}}           -> {error, Err};
         {error, _} = Err                      -> Err;
@@ -340,9 +340,22 @@ tts_to_file(WavPath, Text) ->
     end.
 
 safe_call(Cmd) ->
-    case android:call(Cmd, <<>>, 5000) of
+    case call(Cmd, <<>>, 5000) of
         {ok, R}    -> R;
         {error, E} -> #{<<"error">> => to_bin(E)}
+    end.
+
+%% Wrapper around android:call that decodes raw JSON binary responses
+%% into maps. android.erl's parse_value returns raw binary strings for
+%% objects, so we need to parse them here.
+call(Cmd, Args, Timeout) ->
+    case call(Cmd, Args, Timeout) of
+        {ok, Bin} when is_binary(Bin) ->
+            case decode_json(Bin) of
+                {ok, Map} when is_map(Map) -> {ok, Map};
+                _ -> {ok, Bin}
+            end;
+        Other -> Other
     end.
 
 %% Word Error Rate — Levenshtein distance on word sequences.
@@ -408,6 +421,72 @@ wrap_single(Name, Fun) ->
     io:format("[eval] ~s complete in ~.1fs — results: ~s~n",
               [Name, Elapsed / 1000, Path]),
     {ok, Report}.
+
+%% Minimal JSON decoder — handles flat and nested objects, arrays, strings,
+%% numbers, booleans, null. Returns {ok, Term} or {error, Reason}.
+decode_json(Bin) when is_binary(Bin) ->
+    try
+        {Val, _Rest} = decode_value(skip_ws_bin(Bin)),
+        {ok, Val}
+    catch _:Reason -> {error, Reason}
+    end.
+
+decode_value(<<${, Rest/binary>>) -> decode_object(skip_ws_bin(Rest), #{});
+decode_value(<<$[, Rest/binary>>) -> decode_array(skip_ws_bin(Rest), []);
+decode_value(<<$", Rest/binary>>) -> decode_string(Rest, <<>>);
+decode_value(<<"true", Rest/binary>>)  -> {true, Rest};
+decode_value(<<"false", Rest/binary>>) -> {false, Rest};
+decode_value(<<"null", Rest/binary>>)  -> {null, Rest};
+decode_value(Bin) -> decode_number(Bin, <<>>).
+
+decode_object(<<$}, Rest/binary>>, Acc) -> {Acc, Rest};
+decode_object(<<$", Rest/binary>>, Acc) ->
+    {Key, R1} = decode_string(Rest, <<>>),
+    <<$:, R2/binary>> = skip_ws_bin(R1),
+    {Val, R3} = decode_value(skip_ws_bin(R2)),
+    R4 = skip_ws_bin(R3),
+    case R4 of
+        <<$,, R5/binary>> -> decode_object(skip_ws_bin(R5), maps:put(Key, Val, Acc));
+        <<$}, R5/binary>> -> {maps:put(Key, Val, Acc), R5};
+        _ -> {maps:put(Key, Val, Acc), R4}
+    end.
+
+decode_array(<<$], Rest/binary>>, Acc) -> {lists:reverse(Acc), Rest};
+decode_array(Bin, Acc) ->
+    {Val, R1} = decode_value(Bin),
+    R2 = skip_ws_bin(R1),
+    case R2 of
+        <<$,, R3/binary>> -> decode_array(skip_ws_bin(R3), [Val | Acc]);
+        <<$], R3/binary>> -> {lists:reverse([Val | Acc]), R3};
+        _ -> {lists:reverse([Val | Acc]), R2}
+    end.
+
+decode_string(<<$\\, $", Rest/binary>>, Acc)  -> decode_string(Rest, <<Acc/binary, $">>);
+decode_string(<<$\\, $\\, Rest/binary>>, Acc)  -> decode_string(Rest, <<Acc/binary, $\\>>);
+decode_string(<<$\\, $n, Rest/binary>>, Acc)   -> decode_string(Rest, <<Acc/binary, $\n>>);
+decode_string(<<$\\, $r, Rest/binary>>, Acc)   -> decode_string(Rest, <<Acc/binary, $\r>>);
+decode_string(<<$\\, $t, Rest/binary>>, Acc)   -> decode_string(Rest, <<Acc/binary, $\t>>);
+decode_string(<<$\\, $/, Rest/binary>>, Acc)    -> decode_string(Rest, <<Acc/binary, $/>>);
+decode_string(<<$", Rest/binary>>, Acc)         -> {Acc, Rest};
+decode_string(<<C, Rest/binary>>, Acc)          -> decode_string(Rest, <<Acc/binary, C>>);
+decode_string(<<>>, Acc)                        -> {Acc, <<>>}.
+
+decode_number(<<C, Rest/binary>>, Acc)
+  when (C >= $0 andalso C =< $9) orelse C =:= $- orelse C =:= $. orelse
+       C =:= $e orelse C =:= $E orelse C =:= $+ ->
+    decode_number(Rest, <<Acc/binary, C>>);
+decode_number(Rest, Acc) ->
+    S = binary_to_list(Acc),
+    case lists:member($., S) orelse lists:member($e, S) orelse lists:member($E, S) of
+        true  -> {list_to_float(S), Rest};
+        false -> {list_to_integer(S), Rest}
+    end.
+
+skip_ws_bin(<<$\s, R/binary>>) -> skip_ws_bin(R);
+skip_ws_bin(<<$\t, R/binary>>) -> skip_ws_bin(R);
+skip_ws_bin(<<$\n, R/binary>>) -> skip_ws_bin(R);
+skip_ws_bin(<<$\r, R/binary>>) -> skip_ws_bin(R);
+skip_ws_bin(R) -> R.
 
 %% Minimal JSON formatter for maps/lists/atoms/binaries/numbers.
 format_json(M) when is_map(M) ->
