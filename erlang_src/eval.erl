@@ -225,7 +225,7 @@ roundtrip_test_sentences() ->
 
 run_gemma_eval() ->
     io:format("[eval:gemma] Running Gemma benchmarks~n"),
-    case gemma:status() of
+    case call(<<"gemma_status">>, <<>>, 5000) of
         {ok, #{<<"loaded">> := true}} -> run_gemma_eval_loaded();
         _ ->
             io:format("[eval:gemma] No model loaded — skipping~n"),
@@ -237,10 +237,9 @@ run_gemma_eval_loaded() ->
     LatencyResults = lists:map(fun({Label, Prompt}) ->
         io:format("[eval:gemma]   ~s: ", [Label]),
         T0 = erlang:monotonic_time(millisecond),
-        case gemma:generate(list_to_binary(Prompt), 120000) of
+        case call(<<"gemma_generate">>, list_to_binary(Prompt), 120000) of
             {ok, #{<<"text">> := Text, <<"elapsed_ms">> := ElapsedMs}} ->
                 Wall = erlang:monotonic_time(millisecond) - T0,
-                %% Rough token count: split on whitespace
                 Tokens = length(string:tokens(binary_to_list(Text), " \t\n")),
                 TokPerSec = Tokens * 1000.0 / max(1, ElapsedMs),
                 io:format("~p tok in ~.1fs (~.1f tok/s)~n",
@@ -253,17 +252,17 @@ run_gemma_eval_loaded() ->
                   <<"wall_ms">>     => Wall,
                   <<"tok_per_sec">> => round(TokPerSec * 10) / 10,
                   <<"passed">>      => true};
-            {error, Err} ->
-                io:format("ERROR: ~p~n", [Err]),
+            Other ->
+                io:format("ERROR: ~p~n", [Other]),
                 #{<<"label">> => list_to_binary(Label),
-                  <<"error">> => to_bin(Err), <<"passed">> => false}
+                  <<"error">> => to_bin(Other), <<"passed">> => false}
         end
     end, gemma_latency_prompts()),
     %% Accuracy benchmark — factual QA
     QAResults = lists:map(fun({Question, Expected}) ->
         Prompt = "Answer in one word or short phrase: " ++ Question,
         io:format("[eval:gemma]   QA: ~s → ", [Question]),
-        case gemma:generate(list_to_binary(Prompt), 60000) of
+        case call(<<"gemma_generate">>, list_to_binary(Prompt), 120000) of
             {ok, #{<<"text">> := Answer}} ->
                 AnswerLower = string:lowercase(binary_to_list(Answer)),
                 ExpLower = string:lowercase(Expected),
