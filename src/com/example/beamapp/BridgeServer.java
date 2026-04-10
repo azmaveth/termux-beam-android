@@ -263,6 +263,7 @@ public class BridgeServer {
                 case "mic_record":     result = cmdMicRecord(args); break;
                 case "mic_stop":       result = cmdMicStop(); break;
                 case "tts":            result = cmdTts(args); break;
+                case "tts_file":       result = cmdTtsFile(args); break;
                 case "tts_voices":     result = cmdTtsVoices(args); break;
                 case "stt":            result = cmdStt(args); break;
                 case "listen":         result = cmdListen(args); break;
@@ -963,6 +964,21 @@ public class BridgeServer {
             text = m.group(3);
         }
         return speechEngine.speak(text, sid, speed);
+    }
+
+    /**
+     * TTS to file: generate audio and save as WAV without playing.
+     * Args: "path text" e.g. "/sdcard/eval/test.wav Hello world"
+     */
+    private String cmdTtsFile(String args) {
+        String raw = unquote(args);
+        int space = raw.indexOf(' ');
+        if (space <= 0) return "{\"error\":\"usage: tts_file <path> <text>\"}";
+        String path = raw.substring(0, space).trim();
+        String text = raw.substring(space + 1).trim();
+        if (text.isEmpty()) return "{\"error\":\"empty text\"}";
+        if (!speechEngine.isTtsReady()) return "{\"error\":\"tts engine not ready\"}";
+        return speechEngine.speakToFile(text, path, 5, 1.0f);
     }
 
     private String cmdTtsVoices(String args) {

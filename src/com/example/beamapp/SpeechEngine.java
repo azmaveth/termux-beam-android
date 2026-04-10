@@ -458,6 +458,65 @@ public class SpeechEngine {
     @SuppressWarnings("deprecation")
     public String speak(String text) { return speak(text, 5, 1.0f); }
 
+    /** Generate TTS audio and save to a WAV file without playing. For evals/testing. */
+    public String speakToFile(String text, String wavPath, int speakerId, float speed) {
+        if (tts == null) return "{\"error\":\"TTS not initialized\"}";
+        if (text == null || text.isEmpty()) return "{\"error\":\"empty text\"}";
+        try {
+            long t0 = System.currentTimeMillis();
+            GeneratedAudio audio = tts.generate(text, speakerId, speed);
+            long genMs = System.currentTimeMillis() - t0;
+            float[] samples = audio.getSamples();
+            int sampleRate = audio.getSampleRate();
+            if (samples == null || samples.length == 0) {
+                return "{\"error\":\"TTS generated no audio\"}";
+            }
+            short[] pcm = new short[samples.length];
+            for (int i = 0; i < samples.length; i++) {
+                float s = Math.max(-1.0f, Math.min(1.0f, samples[i]));
+                pcm[i] = (short) (s * 32767);
+            }
+            writeWav(wavPath, pcm, sampleRate);
+            float durationSec = (float) samples.length / sampleRate;
+            return "{\"status\":\"ok\",\"path\":\"" + escJson(wavPath)
+                + "\",\"text\":\"" + escJson(text)
+                + "\",\"duration\":" + String.format("%.1f", durationSec)
+                + ",\"gen_ms\":" + genMs
+                + ",\"sample_rate\":" + sampleRate
+                + ",\"samples\":" + samples.length + "}";
+        } catch (Exception e) {
+            Log.e(TAG, "TTS speakToFile failed", e);
+            return "{\"error\":\"" + escJson(e.getMessage()) + "\"}";
+        }
+    }
+
+    private void writeWav(String path, short[] pcm, int sampleRate) throws Exception {
+        int dataLen = pcm.length * 2;
+        int totalLen = 36 + dataLen;
+        java.io.DataOutputStream out = new java.io.DataOutputStream(
+            new java.io.BufferedOutputStream(new java.io.FileOutputStream(path)));
+        // RIFF header
+        out.writeBytes("RIFF");
+        out.writeInt(Integer.reverseBytes(totalLen));
+        out.writeBytes("WAVE");
+        // fmt chunk
+        out.writeBytes("fmt ");
+        out.writeInt(Integer.reverseBytes(16));  // chunk size
+        out.writeShort(Short.reverseBytes((short) 1));  // PCM
+        out.writeShort(Short.reverseBytes((short) 1));  // mono
+        out.writeInt(Integer.reverseBytes(sampleRate));
+        out.writeInt(Integer.reverseBytes(sampleRate * 2));  // byte rate
+        out.writeShort(Short.reverseBytes((short) 2));  // block align
+        out.writeShort(Short.reverseBytes((short) 16)); // bits per sample
+        // data chunk
+        out.writeBytes("data");
+        out.writeInt(Integer.reverseBytes(dataLen));
+        for (short s : pcm) {
+            out.writeShort(Short.reverseBytes(s));
+        }
+        out.close();
+    }
+
     @SuppressWarnings("deprecation")
     public String speak(String text, int speakerId, float speed) {
         if (tts == null) return "{\"error\":\"TTS not initialized\"}";
