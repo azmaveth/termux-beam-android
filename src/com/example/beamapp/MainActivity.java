@@ -37,6 +37,8 @@ public class MainActivity extends Activity {
     private Button sendButton;
     private Button copyButton;
     private Button listenButton;
+    private Button settingsButton;
+    private String runtimeLabel = "OTP 28";
 
     private volatile boolean isListening = false;
     private volatile Socket listenSocket;
@@ -87,7 +89,17 @@ public class MainActivity extends Activity {
         sendButton = findViewById(R.id.send_button);
         copyButton = findViewById(R.id.copy_button);
         listenButton = findViewById(R.id.listen_button);
+        settingsButton = findViewById(R.id.settings_button);
         listenButton.setEnabled(false);
+
+        runtimeLabel = loadRuntimeLabel();
+
+        settingsButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startActivity(new Intent(MainActivity.this, ConfigActivity.class));
+            }
+        });
 
         listenButton.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -243,9 +255,21 @@ public class MainActivity extends Activity {
         }
     }
 
+    private String loadRuntimeLabel() {
+        /* Read bundled erts_version asset written by prepare_assets.sh */
+        try (BufferedReader br = new BufferedReader(
+                new InputStreamReader(getAssets().open("erlang/erts_version")))) {
+            String v = br.readLine();
+            if (v != null && !v.trim().isEmpty()) {
+                return "OTP 28 / ERTS " + v.trim();
+            }
+        } catch (Exception e) { /* fall through to default */ }
+        return "OTP 28";
+    }
+
     private void updateStatus(boolean running) {
         if (running) {
-            statusText.setText("Running (OTP 28 / ERTS 16.2)");
+            statusText.setText("Running (" + runtimeLabel + ")");
             statusText.setTextColor(0xFF4CAF50);
             startButton.setEnabled(false);
             stopButton.setEnabled(true);

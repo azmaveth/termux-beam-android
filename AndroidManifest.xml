@@ -52,6 +52,12 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ConfigActivity"
+            android:exported="false"
+            android:label="@string/settings"
+            android:parentActivityName=".MainActivity" />
+
         <service
             android:name=".BeamService"
             android:foregroundServiceType="dataSync|camera|microphone|location|phoneCall"
