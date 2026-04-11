@@ -349,6 +349,13 @@ public class BridgeServer {
                 case "beam_load":      result = cmdBeam("load_module " + args); break;
                 case "beam_modules":   result = cmdBeam("modules"); break;
                 case "beam_sync":      result = cmdBeamSync(args); break;
+                case "cluster_nodes":  result = cmdCluster("cluster:nodes_info()."); break;
+                case "cluster_apps":   result = cmdCluster("cluster:apps('" + unquote(args) + "')."); break;
+                case "cluster_eval":   result = cmdClusterEval(args); break;
+                case "cluster_sql":    result = cmdClusterSql(args); break;
+                case "cluster_sdr_recent":  result = cmdCluster("cluster:sdr_recent(" + parseInt(args, 10) + ")."); break;
+                case "cluster_sdr_aircraft": result = cmdCluster("cluster:sdr_aircraft(" + parseInt(args, 50) + ")."); break;
+                case "cluster_sdr_count":   result = cmdCluster("cluster:sdr_count()."); break;
                 case "ping":           result = "\"pong\""; break;
                 default:
                     return "{\"id\":" + id + ",\"ok\":false,\"error\":\"unknown command: " + cmd + "\"}";
@@ -405,6 +412,74 @@ public class BridgeServer {
         } catch (Exception e) {
             return "{\"error\":\"beam command error: " + escJson(e.getMessage()) + "\"}";
         }
+    }
+
+    /* ---- Cluster commands ---- */
+
+    /**
+     * Run a cluster.erl expression via the BEAM command port with a longer timeout.
+     * Unlike beam_eval, this uses a 60s timeout for cross-node operations.
+     */
+    private String cmdCluster(String erlExpr) {
+        try (Socket sock = new Socket("127.0.0.1", 9876)) {
+            sock.setSoTimeout(60000);
+            OutputStream os = sock.getOutputStream();
+            BufferedReader br = new BufferedReader(new InputStreamReader(sock.getInputStream()));
+            os.write(("eval " + erlExpr).getBytes());
+            os.flush();
+            char[] buf = new char[1048576]; // 1 MB buffer for large results
+            int n = br.read(buf);
+            if (n > 0) {
+                String resp = new String(buf, 0, n).trim();
+                if (resp.startsWith("ERROR: ")) {
+                    return "{\"error\":\"" + escJson(resp.substring(7)) + "\"}";
+                }
+                return "\"" + escJson(resp) + "\"";
+            }
+            return "{\"error\":\"no response from BEAM\"}";
+        } catch (java.net.ConnectException e) {
+            return "{\"error\":\"BEAM VM not running\"}";
+        } catch (Exception e) {
+            return "{\"error\":\"cluster error: " + escJson(e.getMessage()) + "\"}";
+        }
+    }
+
+    /**
+     * Evaluate Elixir code on a remote node.
+     * Args: "node_name elixir code here..."
+     * Example: "sdr_node@10.42.42.104 Enum.count([1,2,3])"
+     */
+    private String cmdClusterEval(String args) {
+        String raw = unquote(args);
+        int space = raw.indexOf(' ');
+        if (space <= 0) return "{\"error\":\"usage: cluster_eval <node> <elixir_code>\"}";
+        String node = raw.substring(0, space).trim();
+        String code = raw.substring(space + 1).trim();
+        // Escape the Elixir code for embedding in an Erlang binary literal
+        String escaped = code.replace("\\", "\\\\").replace("\"", "\\\"");
+        String expr = "cluster:eval('" + node + "', <<\"" + escaped + "\">>).";
+        return cmdCluster(expr);
+    }
+
+    /**
+     * Run SQL on a remote node's SQLite database.
+     * Args: "node_name /path/to/db.db SELECT ..."
+     * The first two space-separated tokens are node and db path, rest is SQL.
+     */
+    private String cmdClusterSql(String args) {
+        String raw = unquote(args);
+        // Parse: node dbpath sql...
+        String[] parts = raw.split("\\s+", 3);
+        if (parts.length < 3) {
+            return "{\"error\":\"usage: cluster_sql <node> <db_path> <sql>\"}";
+        }
+        String node = parts[0];
+        String dbPath = parts[1];
+        String sql = parts[2];
+        String escaped = sql.replace("\\", "\\\\").replace("\"", "\\\"");
+        String dbEscaped = dbPath.replace("\\", "\\\\").replace("\"", "\\\"");
+        String expr = "cluster:sql('" + node + "', <<\"" + dbEscaped + "\">>, <<\"" + escaped + "\">>).";
+        return cmdCluster(expr);
     }
 
     /* ---- BEAM module sync ---- */
