@@ -522,6 +522,8 @@ public class BeamService extends Service {
                         beamArgs.add("-setcookie"); beamArgs.add(cookie);
                         beamArgs.add("-kernel"); beamArgs.add("net_ticktime");
                         beamArgs.add("120");
+                        beamArgs.add("-kernel"); beamArgs.add("prevent_overlapping_partitions");
+                        beamArgs.add("false");
                     }
 
                     beamArgs.add("-eval"); beamArgs.add(evalCode);
