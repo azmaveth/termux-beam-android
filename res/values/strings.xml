@@ -11,7 +11,98 @@
     <string name="channel_desc">Keeps the BEAM VM running</string>
     <string name="notif_title">BEAM VM Running</string>
     <string name="notif_text">Erlang/OTP is active</string>
+    <string name="commands">Commands</string>
     <string name="copy_log">Copy Log</string>
+    <string name="commands_detail">
+\n<b>System</b>
+\ndevice — device model, OS, hardware info
+\nbattery — level, charging, temperature
+\nmemory — JVM heap usage
+\nprocesses — process memory/CPU
+\npackages — list installed apps
+\nservices — list system services
+\nfeatures — list device features
+\nshell &lt;cmd&gt; — run a shell command
+\nprop &lt;name&gt; — read Android system property
+\n
+\n<b>Network</b>
+\nwifi — connected WiFi details
+\nnetwork — connectivity status
+\nlocation — GPS coordinates
+\ntelephony — carrier, SIM info
+\n
+\n<b>Display &amp; Input</b>
+\nbrightness — get screen brightness
+\nbrightness_set &lt;0-255&gt; — set brightness
+\nvibrate &lt;ms&gt; — vibrate device
+\ntoast &lt;msg&gt; — show toast message
+\nnotify &lt;title&gt; &lt;body&gt; — show notification
+\nclipboard — get clipboard text
+\ncopy &lt;text&gt; — set clipboard text
+\n
+\n<b>Speech</b>
+\nsay &lt;text&gt; — speak text (TTS)
+\ntts_file &lt;path&gt; &lt;text&gt; — TTS to WAV file
+\nlisten [secs] — record and transcribe
+\nstream_listen [secs] — streaming STT with VAD
+\nrecord [secs] — record mic to WAV
+\nstt [path] — transcribe a WAV file
+\ntranscribe [path] — offline STT (SenseVoice)
+\ndiarize [path] — speaker diarization
+\nspeech_status — engine component status
+\n
+\n<b>Gemma LLM</b>
+\ngemma_load &lt;path&gt; — load .litertlm model
+\ngemma_generate &lt;prompt&gt; — generate text
+\ngemma_stream &lt;prompt&gt; — streaming generation
+\ngemma_unload — release model
+\ngemma_status — loaded model info
+\ngemma_cancel — cancel generation
+\n
+\n<b>Bluetooth</b>
+\nbt_status — adapter status
+\nbt_bonded — paired devices
+\nbt_connected — connected profiles
+\nbt_scan [secs] — classic scan
+\nbt_scan_ble [secs] — BLE scan
+\nbt_gatt &lt;addr&gt; — discover GATT services
+\nbt_gatt_read &lt;addr&gt; &lt;uuid&gt; — read characteristic
+\nbt_gatt_write &lt;addr&gt; &lt;uuid&gt; &lt;hex&gt; — write characteristic
+\nbt_rssi &lt;addr&gt; — read BLE signal strength
+\n
+\n<b>Screen Control</b> (requires Accessibility)
+\nscreen_read — dump UI tree
+\nscreen_find &lt;text&gt; — find element by text
+\nscreen_click &lt;text&gt; — click element
+\nscreen_tap &lt;x&gt; &lt;y&gt; — tap coordinates
+\nscreen_type &lt;text&gt; — type into focused field
+\nscreen_swipe &lt;x1&gt; &lt;y1&gt; &lt;x2&gt; &lt;y2&gt; — swipe
+\nscreen_scroll &lt;dir&gt; — scroll up/down/left/right
+\nscreen_key &lt;key&gt; — send key press
+\nscreen_launch &lt;pkg&gt; — launch app
+\nscreen_back / screen_home / screen_recents
+\nscreen_screenshot &lt;path&gt; — capture screen
+\n
+\n<b>Sensors</b>
+\nsensors — list available sensors
+\nsensor_start &lt;type&gt; — start reading sensor
+\nsensor_read &lt;type&gt; — get current value
+\nsensor_stop &lt;type&gt; — stop sensor
+\n
+\n<b>Files &amp; Media</b>
+\nfile_read &lt;path&gt; — read file contents
+\nfile_write &lt;path&gt; &lt;content&gt; — write file
+\nfile_list &lt;path&gt; — list directory
+\naudio_info — audio routing info
+\nvolume_get — get volume levels
+\nvolume_set &lt;stream&gt; &lt;level&gt; — set volume
+\n
+\n<b>BEAM</b>
+\nbeam_eval &lt;expr&gt; — evaluate Erlang expression
+\nbeam_sync — reload modules from /sdcard/.beam-modules/
+\nbeam_modules — list loaded modules
+\neval_run &lt;suite&gt; — run eval (tts/stt/gemma/system)
+    </string>
     <string name="start_listen">Start Listening</string>
     <string name="stop_listen">Stop Listening</string>
     <string name="settings">Settings</string>

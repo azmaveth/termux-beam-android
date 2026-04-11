@@ -17,6 +17,8 @@ import android.widget.EditText;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.app.AlertDialog;
+import android.text.Html;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -38,6 +40,7 @@ public class MainActivity extends Activity {
     private Button copyButton;
     private Button listenButton;
     private Button settingsButton;
+    private Button commandsButton;
     private String runtimeLabel = "OTP 28";
 
     private volatile boolean isListening = false;
@@ -90,6 +93,7 @@ public class MainActivity extends Activity {
         copyButton = findViewById(R.id.copy_button);
         listenButton = findViewById(R.id.listen_button);
         settingsButton = findViewById(R.id.settings_button);
+        commandsButton = findViewById(R.id.commands_button);
         listenButton.setEnabled(false);
 
         runtimeLabel = loadRuntimeLabel();
@@ -98,6 +102,13 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View v) {
                 startActivity(new Intent(MainActivity.this, ConfigActivity.class));
+            }
+        });
+
+        commandsButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showCommandsDialog();
             }
         });
 
@@ -253,6 +264,23 @@ public class MainActivity extends Activity {
         if (!needed.isEmpty()) {
             requestPermissions(needed.toArray(new String[0]), 1);
         }
+    }
+
+    private void showCommandsDialog() {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setPadding(32, 16, 32, 16);
+        TextView tv = new TextView(this);
+        tv.setText(Html.fromHtml(getString(R.string.commands_detail), Html.FROM_HTML_MODE_COMPACT));
+        tv.setTextSize(13);
+        tv.setTextColor(0xFF333333);
+        tv.setTypeface(android.graphics.Typeface.MONOSPACE);
+        tv.setLineSpacing(0, 1.2f);
+        scroll.addView(tv);
+        new AlertDialog.Builder(this)
+            .setTitle("Available Commands")
+            .setView(scroll)
+            .setPositiveButton("Close", null)
+            .show();
     }
 
     private String loadRuntimeLabel() {
