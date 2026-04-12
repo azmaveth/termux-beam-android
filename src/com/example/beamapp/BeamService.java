@@ -256,7 +256,8 @@ public class BeamService extends Service {
                         "          end) " +
                         "      end " +
                         "    end, Nodes), " +
-                        "    io:format(\"Connected nodes: ~p~n\", [nodes()]) " +
+                        "    io:format(\"Connected nodes: ~p~n\", [nodes()]), " +
+                        "    reconnect:start(Nodes) " +
                         "end, " +
 
                         /* Start command TCP server on 9876 for interactive use */
