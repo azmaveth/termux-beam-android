@@ -345,7 +345,7 @@ public class MainActivity extends Activity {
         return false;
     }
 
-    /** Remote ASR: record via mic_record, then send to BEAM for remote transcription */
+    /** Remote ASR: record until Stop is pressed, then send to GPU for transcription */
     private void startRemoteListen() {
         appendLog("[Listening (remote GPU)...]\n");
 
@@ -359,42 +359,63 @@ public class MainActivity extends Activity {
                     BufferedReader reader = new BufferedReader(
                         new InputStreamReader(sock.getInputStream()));
 
-                    // Start recording (will auto-stop after duration)
-                    int duration = 5;
-                    String recReq = "{\"id\":100,\"cmd\":\"mic_record\",\"args\":\"" + duration + "\"}";
+                    // Start recording indefinitely (until mic_stop)
+                    String recReq = "{\"id\":100,\"cmd\":\"mic_record\",\"args\":\"stream\"}";
                     os.write((recReq + "\n").getBytes());
                     os.flush();
                     String recResponse = reader.readLine();
 
+                    // Extract the WAV path from mic_record response
+                    String wavPath = extractJsonString(recResponse, "path");
+
+                    // Wait until user clicks Stop (isListening becomes false)
+                    while (isListening) {
+                        Thread.sleep(100);
+                    }
+
+                    // Stop recording
+                    String stopReq = "{\"id\":101,\"cmd\":\"mic_stop\",\"args\":\"\"}";
+                    os.write((stopReq + "\n").getBytes());
+                    os.flush();
+                    String stopResponse = reader.readLine();
+
+                    // Use path from stop response if available, fall back to record response
+                    String stopPath = extractJsonString(stopResponse, "path");
+                    if (stopPath != null && !stopPath.isEmpty()) wavPath = stopPath;
+
+                    if (wavPath == null || wavPath.isEmpty()) {
+                        runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                appendLog("[Error] No recording path found\n");
+                            }
+                        });
+                        sock.close();
+                        return;
+                    }
+
+                    final String path = wavPath;
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
-                            appendLog("[Recording " + duration + "s...]\n");
+                            appendLog("[Transcribing...]\n");
                         }
                     });
 
-                    // Wait for recording to finish
-                    Thread.sleep((duration + 1) * 1000);
-
-                    // Now call speech:listen via BEAM eval — it reads the config
-                    // and routes to remote_listen which sends to gpu2
-                    String evalReq = "{\"id\":101,\"cmd\":\"beam_eval\",\"args\":\"speech:listen(" + duration + ").\"}";
+                    // Send to remote ASR via BEAM: speech:remote_transcribe(Path)
+                    String evalExpr = "speech:remote_transcribe(<<\"" + escEval(wavPath) + "\">>).";
+                    String evalReq = "{\"id\":102,\"cmd\":\"beam_eval\",\"args\":\"" + escJson(evalExpr) + "\"}";
                     os.write((evalReq + "\n").getBytes());
                     os.flush();
 
-                    // Wait for transcription result
                     String evalResponse = reader.readLine();
 
                     final String resultText;
                     if (evalResponse != null) {
-                        // Extract the text from the response
-                        // Response format: {"id":101,"ok":true,"data":"..."}
                         int dataIdx = evalResponse.indexOf("\"data\":");
                         if (dataIdx >= 0) {
                             String data = evalResponse.substring(dataIdx + 7);
-                            // Remove trailing }
                             if (data.endsWith("}")) data = data.substring(0, data.length() - 1);
-                            // Unquote
                             if (data.startsWith("\"") && data.endsWith("\""))
                                 data = data.substring(1, data.length() - 1);
                             resultText = data.replace("\\n", "\n").replace("\\\"", "\"");
@@ -416,14 +437,12 @@ public class MainActivity extends Activity {
                     sock.close();
                 } catch (final Exception e) {
                     final String msg = e.getMessage();
-                    if (isListening) {
-                        runOnUiThread(new Runnable() {
-                            @Override
-                            public void run() {
-                                appendLog("[Remote listen error] " + msg + "\n");
-                            }
-                        });
-                    }
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            appendLog("[Remote listen error] " + msg + "\n");
+                        }
+                    });
                 } finally {
                     listenSocket = null;
                     runOnUiThread(new Runnable() {
@@ -437,6 +456,26 @@ public class MainActivity extends Activity {
                 }
             }
         }).start();
+    }
+
+    /** Extract a string value from a JSON response */
+    private static String extractJsonString(String json, String key) {
+        if (json == null) return null;
+        String search = "\"" + key + "\":\"";
+        int idx = json.indexOf(search);
+        if (idx < 0) return null;
+        int start = idx + search.length();
+        int end = json.indexOf("\"", start);
+        if (end < 0) return null;
+        return json.substring(start, end).replace("\\\"", "\"").replace("\\\\", "\\");
+    }
+
+    private static String escEval(String s) {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    private static String escJson(String s) {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     /** Local ASR: stream_listen via sherpa-onnx JNI */
@@ -536,13 +575,18 @@ public class MainActivity extends Activity {
         isListening = false;
         listenButton.setText(R.string.start_listen);
         partialLogStart = -1;
-        Socket sock = listenSocket;
-        if (sock != null) {
-            try {
-                sock.close();
-            } catch (Exception e) { /* ignore */ }
+        if (!isRemoteAsrMode()) {
+            // Local mode: close socket to interrupt stream_listen
+            Socket sock = listenSocket;
+            if (sock != null) {
+                try {
+                    sock.close();
+                } catch (Exception e) { /* ignore */ }
+            }
+            appendLog("[Stopped listening]\n");
         }
-        appendLog("[Stopped listening]\n");
+        // Remote mode: the recording thread detects isListening=false,
+        // stops mic, and sends to GPU for transcription
     }
 
     private void appendLog(String text) {
