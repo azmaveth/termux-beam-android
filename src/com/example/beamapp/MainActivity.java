@@ -318,7 +318,130 @@ public class MainActivity extends Activity {
         isListening = true;
         partialLogStart = -1;
         listenButton.setText(R.string.stop_listen);
-        appendLog("[Listening...]\n");
+
+        if (isRemoteAsrMode()) {
+            startRemoteListen();
+        } else {
+            startLocalStreamListen();
+        }
+    }
+
+    /** Check .beam-config for asr_mode=remote */
+    private boolean isRemoteAsrMode() {
+        try {
+            java.io.File f = new java.io.File("/sdcard/.beam-config");
+            if (!f.exists()) return false;
+            BufferedReader br = new BufferedReader(new java.io.FileReader(f));
+            String line;
+            while ((line = br.readLine()) != null) {
+                String trimmed = line.trim();
+                if (trimmed.startsWith("asr_mode=")) {
+                    br.close();
+                    return trimmed.substring(9).trim().equalsIgnoreCase("remote");
+                }
+            }
+            br.close();
+        } catch (Exception e) { /* ignore */ }
+        return false;
+    }
+
+    /** Remote ASR: record via mic_record, then send to BEAM for remote transcription */
+    private void startRemoteListen() {
+        appendLog("[Listening (remote GPU)...]\n");
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Socket sock = new Socket("127.0.0.1", 9877);
+                    listenSocket = sock;
+                    OutputStream os = sock.getOutputStream();
+                    BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(sock.getInputStream()));
+
+                    // Start recording (will auto-stop after duration)
+                    int duration = 5;
+                    String recReq = "{\"id\":100,\"cmd\":\"mic_record\",\"args\":\"" + duration + "\"}";
+                    os.write((recReq + "\n").getBytes());
+                    os.flush();
+                    String recResponse = reader.readLine();
+
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            appendLog("[Recording " + duration + "s...]\n");
+                        }
+                    });
+
+                    // Wait for recording to finish
+                    Thread.sleep((duration + 1) * 1000);
+
+                    // Now call speech:listen via BEAM eval — it reads the config
+                    // and routes to remote_listen which sends to gpu2
+                    String evalReq = "{\"id\":101,\"cmd\":\"beam_eval\",\"args\":\"speech:listen(" + duration + ").\"}";
+                    os.write((evalReq + "\n").getBytes());
+                    os.flush();
+
+                    // Wait for transcription result
+                    String evalResponse = reader.readLine();
+
+                    final String resultText;
+                    if (evalResponse != null) {
+                        // Extract the text from the response
+                        // Response format: {"id":101,"ok":true,"data":"..."}
+                        int dataIdx = evalResponse.indexOf("\"data\":");
+                        if (dataIdx >= 0) {
+                            String data = evalResponse.substring(dataIdx + 7);
+                            // Remove trailing }
+                            if (data.endsWith("}")) data = data.substring(0, data.length() - 1);
+                            // Unquote
+                            if (data.startsWith("\"") && data.endsWith("\""))
+                                data = data.substring(1, data.length() - 1);
+                            resultText = data.replace("\\n", "\n").replace("\\\"", "\"");
+                        } else {
+                            resultText = evalResponse;
+                        }
+                    } else {
+                        resultText = "(no response)";
+                    }
+
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            partialLogStart = -1;
+                            appendLog("[Remote STT] " + resultText + "\n");
+                        }
+                    });
+
+                    sock.close();
+                } catch (final Exception e) {
+                    final String msg = e.getMessage();
+                    if (isListening) {
+                        runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                appendLog("[Remote listen error] " + msg + "\n");
+                            }
+                        });
+                    }
+                } finally {
+                    listenSocket = null;
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            isListening = false;
+                            partialLogStart = -1;
+                            listenButton.setText(R.string.start_listen);
+                        }
+                    });
+                }
+            }
+        }).start();
+    }
+
+    /** Local ASR: stream_listen via sherpa-onnx JNI */
+    private void startLocalStreamListen() {
+        appendLog("[Listening (local)...]\n");
 
         new Thread(new Runnable() {
             @Override

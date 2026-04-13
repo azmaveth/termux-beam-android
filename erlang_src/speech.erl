@@ -210,27 +210,20 @@ local_transcribe(WavPath) ->
 %% the WAV file to the remote ASR node via RPC.
 remote_listen(Seconds) ->
     Timeout = (Seconds + 5) * 1000,
-    %% mic_record returns {"status":"recording","path":"...","duration":N}
-    %% The android bridge parses this into a map or raw JSON string.
+    %% mic_record returns a raw JSON string like:
+    %%   {"status":"recording","path":"/data/.../rec_123.wav","duration":3}
     case android:call(<<"mic_record">>, integer_to_binary(Seconds), Timeout) of
         {ok, Result} ->
-            %% Wait for recording to finish
+            WavPath = extract_path(Result, <<>>),
+            %% Wait for recording to finish (recording auto-stops after duration)
             timer:sleep((Seconds + 1) * 1000),
-            %% Get the path — mic_stop returns it, or we can read it from the result
-            case android:call(<<"mic_stop">>, <<>>, 5000) of
-                {ok, StopResult} ->
-                    WavPath = extract_path(StopResult, extract_path(Result, <<>>)),
-                    case WavPath of
-                        <<>> -> {error, no_wav_path};
-                        _ -> remote_transcribe(WavPath)
-                    end;
+            case WavPath of
+                <<>> ->
+                    io:format("[speech] remote_listen: no path in mic_record result: ~p~n", [Result]),
+                    {error, {no_wav_path, Result}};
                 _ ->
-                    %% mic_stop failed, try path from initial result
-                    WavPath = extract_path(Result, <<>>),
-                    case WavPath of
-                        <<>> -> {error, no_wav_path};
-                        _ -> remote_transcribe(WavPath)
-                    end
+                    io:format("[speech] remote_listen: recorded to ~s~n", [WavPath]),
+                    remote_transcribe(WavPath)
             end;
         {error, _} = Err -> Err;
         Other -> {error, Other}
