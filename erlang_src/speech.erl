@@ -6,6 +6,7 @@
          transcribe/1, status/0]).
 -export([asr_mode/0, set_asr_mode/1, remote_asr_node/0, set_remote_asr_node/1]).
 -export([hotwords/0, set_hotwords/1, clear_hotwords/0]).
+-export([remote_transcribe/1]).
 
 -define(CONFIG_PATH, "/sdcard/.beam-config").
 -define(DEFAULT_ASR_NODE, 'arbor_gpu2@10.42.42.97').
