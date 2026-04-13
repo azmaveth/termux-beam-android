@@ -904,7 +904,10 @@ public class BridgeServer {
     @SuppressWarnings("MissingPermission")
     private String cmdMicRecord(String args) {
         if (recording.get()) return "\"already recording\"";
-        int durationSec = parseInt(args, 5);
+        // "stream" means record indefinitely until mic_stop
+        int durationSec = "stream".equalsIgnoreCase(unquote(args))
+            ? 3600  // 1 hour max
+            : parseInt(args, 5);
 
         int bufSize = Math.max(
             AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT),
