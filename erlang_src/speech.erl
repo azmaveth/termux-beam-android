@@ -254,11 +254,17 @@ extract_path(Result, Default) when is_binary(Result) ->
 extract_path(_, Default) -> Default.
 
 %% @doc Send a WAV file to the remote ASR node for transcription.
+%% Includes local hotwords from /sdcard/.beam-dictionary if present.
 remote_transcribe(WavPath) ->
     Node = remote_asr_node(),
     case file:read_file(WavPath) of
         {ok, WavBinary} ->
-            case rpc:call(Node, 'Elixir.Asr', transcribe, [WavBinary], 30000) of
+            Hotwords = load_local_hotwords(),
+            Opts = case Hotwords of
+                [] -> [];
+                _ -> [{hotwords, Hotwords}]
+            end,
+            case rpc:call(Node, 'Elixir.Asr', transcribe, [WavBinary, Opts], 30000) of
                 {ok, #{<<"text">> := Text}} ->
                     {ok, Text};
                 {ok, Result} when is_map(Result) ->
@@ -273,6 +279,18 @@ remote_transcribe(WavPath) ->
             end;
         {error, Reason} ->
             {error, {read_wav_failed, Reason}}
+    end.
+
+%% @doc Load hotwords from the local dictionary file.
+load_local_hotwords() ->
+    case file:read_file("/sdcard/.beam-dictionary") of
+        {ok, Bin} ->
+            Lines = string:split(binary_to_list(Bin), "\n", all),
+            [list_to_binary(string:trim(L)) ||
+             L <- Lines,
+             string:trim(L) =/= "",
+             hd(string:trim(L)) =/= $#];
+        {error, _} -> []
     end.
 
 %%% ============================================================

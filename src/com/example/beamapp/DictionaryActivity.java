@@ -89,7 +89,9 @@ public class DictionaryActivity extends Activity {
             if (!w.isEmpty()) words.add(w);
         }
 
-        // Save to local file
+        // Save to local file — hotwords are sent with each transcription request,
+        // not pre-loaded on the service. This works offline and doesn't require
+        // cluster connectivity at save time.
         try (FileOutputStream fos = new FileOutputStream(DICT_FILE)) {
             StringBuilder sb = new StringBuilder();
             sb.append("# BeamApp Custom Dictionary\n");
@@ -104,12 +106,11 @@ public class DictionaryActivity extends Activity {
             return;
         }
 
-        // Send to remote ASR service via BEAM
-        if (!words.isEmpty()) {
-            applyHotwords(words);
-        } else {
-            clearHotwords();
-        }
+        statusText.setText("Dictionary saved (" + words.size() + " words). " +
+            "Words will be sent with each transcription request.");
+        statusText.setTextColor(0xFF4CAF50);
+        statusText.setVisibility(View.VISIBLE);
+        Toast.makeText(this, "Dictionary saved", Toast.LENGTH_SHORT).show();
     }
 
     private void applyHotwords(final List<String> words) {
