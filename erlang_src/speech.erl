@@ -5,6 +5,7 @@
 -export([say/1, say/2, listen/0, listen/1, stream_listen/0, stream_listen/1,
          transcribe/1, status/0]).
 -export([asr_mode/0, set_asr_mode/1, remote_asr_node/0, set_remote_asr_node/1]).
+-export([hotwords/0, set_hotwords/1, clear_hotwords/0]).
 
 -define(CONFIG_PATH, "/sdcard/.beam-config").
 -define(DEFAULT_ASR_NODE, 'arbor_gpu2@10.42.42.97').
@@ -86,6 +87,45 @@ status() ->
     end,
     {ok, #{mode => Mode, local => LocalStatus, remote => RemoteStatus,
            remote_node => Node}}.
+
+%%% ============================================================
+%%% Hotword Management (delegates to remote ASR node)
+%%% ============================================================
+
+%% @doc Get current hotwords from the remote ASR service.
+-spec hotwords() -> {ok, list()} | {error, term()}.
+hotwords() ->
+    Node = remote_asr_node(),
+    case rpc:call(Node, 'Elixir.Asr', hotwords, [], 5000) of
+        {ok, #{<<"hotwords">> := Words}} -> {ok, Words};
+        {ok, Result} -> {ok, Result};
+        {badrpc, Reason} -> {error, {rpc_failed, Reason}};
+        Other -> Other
+    end.
+
+%% @doc Set hotwords on the remote ASR service.
+%% Words is a list of binaries or strings, e.g.:
+%%   speech:set_hotwords([<<"Hysun">>, <<"Kang">>, <<"azmaveth">>]).
+-spec set_hotwords(list()) -> {ok, list()} | {error, term()}.
+set_hotwords(Words) when is_list(Words) ->
+    BinWords = [to_bin(W) || W <- Words],
+    Node = remote_asr_node(),
+    case rpc:call(Node, 'Elixir.Asr', set_hotwords, [BinWords], 10000) of
+        {ok, #{<<"hotwords">> := Applied}} -> {ok, Applied};
+        {ok, Result} -> {ok, Result};
+        {badrpc, Reason} -> {error, {rpc_failed, Reason}};
+        Other -> Other
+    end.
+
+%% @doc Clear all hotwords on the remote ASR service.
+-spec clear_hotwords() -> ok | {error, term()}.
+clear_hotwords() ->
+    Node = remote_asr_node(),
+    case rpc:call(Node, 'Elixir.Asr', clear_hotwords, [], 5000) of
+        {ok, _} -> ok;
+        {badrpc, Reason} -> {error, {rpc_failed, Reason}};
+        Other -> Other
+    end.
 
 %%% ============================================================
 %%% ASR Mode Configuration
