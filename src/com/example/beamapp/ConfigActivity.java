@@ -31,6 +31,8 @@ public class ConfigActivity extends Activity {
     private EditText cookieField;
     private Button cookieShowButton;
     private Button cookieGenerateButton;
+    private Switch asrRemoteSwitch;
+    private EditText remoteAsrNodeField;
     private Button saveButton;
     private Button cancelButton;
 
@@ -48,6 +50,8 @@ public class ConfigActivity extends Activity {
         cookieField          = findViewById(R.id.config_cookie);
         cookieShowButton     = findViewById(R.id.config_cookie_show);
         cookieGenerateButton = findViewById(R.id.config_cookie_generate);
+        asrRemoteSwitch      = findViewById(R.id.config_asr_remote_switch);
+        remoteAsrNodeField   = findViewById(R.id.config_remote_asr_node);
         saveButton           = findViewById(R.id.config_save);
         cancelButton         = findViewById(R.id.config_cancel);
 
@@ -106,6 +110,8 @@ public class ConfigActivity extends Activity {
         originalConfig.put("node_name", "beamapp@10.42.43.2");
         originalConfig.put("cookie", "");
         originalConfig.put("cluster_nodes", "");
+        originalConfig.put("asr_mode", "local");
+        originalConfig.put("remote_asr_node", "arbor_gpu2@10.42.42.97");
 
         File f = new File(CONFIG_PATH);
         if (f.exists()) {
@@ -132,6 +138,9 @@ public class ConfigActivity extends Activity {
         nodeNameField.setText(valueOrEmpty("node_name"));
         clusterNodesField.setText(valueOrEmpty("cluster_nodes"));
         cookieField.setText(valueOrEmpty("cookie"));
+        asrRemoteSwitch.setChecked("remote".equalsIgnoreCase(
+            originalConfig.get("asr_mode")));
+        remoteAsrNodeField.setText(valueOrEmpty("remote_asr_node"));
     }
 
     private String valueOrEmpty(String key) {
@@ -147,6 +156,8 @@ public class ConfigActivity extends Activity {
                               .replaceAll("^,|,$", "");
         String cookie       = cookieField.getText().toString().trim();
         boolean distributed = distributedSwitch.isChecked();
+        boolean asrRemote   = asrRemoteSwitch.isChecked();
+        String remoteAsrNode = remoteAsrNodeField.getText().toString().trim();
 
         if (distributed) {
             if (nodeName.isEmpty() || !nodeName.contains("@")) {
@@ -166,6 +177,8 @@ public class ConfigActivity extends Activity {
         originalConfig.put("node_name", nodeName);
         originalConfig.put("cluster_nodes", clusterNodes);
         originalConfig.put("cookie", cookie);
+        originalConfig.put("asr_mode", asrRemote ? "remote" : "local");
+        originalConfig.put("remote_asr_node", remoteAsrNode);
 
         StringBuilder out = new StringBuilder();
         out.append("# BeamApp Distributed Erlang Configuration\n");
@@ -177,14 +190,19 @@ public class ConfigActivity extends Activity {
         out.append("# Erlang distribution cookie (must match on all nodes)\n");
         out.append("cookie=").append(originalConfig.get("cookie")).append("\n\n");
         out.append("# Comma-separated list of nodes to connect to on startup\n");
-        out.append("cluster_nodes=").append(originalConfig.get("cluster_nodes")).append("\n");
+        out.append("cluster_nodes=").append(originalConfig.get("cluster_nodes")).append("\n\n");
+        out.append("# Speech recognition: 'local' (on-device) or 'remote' (GPU via cluster)\n");
+        out.append("asr_mode=").append(originalConfig.get("asr_mode")).append("\n\n");
+        out.append("# BEAM node running the ASR service (when asr_mode=remote)\n");
+        out.append("remote_asr_node=").append(originalConfig.get("remote_asr_node")).append("\n");
 
         /* Append any foreign keys we loaded but don't edit */
         boolean wroteHeader = false;
         for (Map.Entry<String, String> e : originalConfig.entrySet()) {
             String k = e.getKey();
             if (k.equals("distributed") || k.equals("node_name")
-                || k.equals("cookie") || k.equals("cluster_nodes")) continue;
+                || k.equals("cookie") || k.equals("cluster_nodes")
+                || k.equals("asr_mode") || k.equals("remote_asr_node")) continue;
             if (!wroteHeader) {
                 out.append("\n# Additional settings\n");
                 wroteHeader = true;
