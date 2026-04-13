@@ -8,6 +8,7 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.Switch;
 import android.widget.Toast;
+import android.content.Intent;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -54,6 +55,13 @@ public class ConfigActivity extends Activity {
         remoteAsrNodeField   = findViewById(R.id.config_remote_asr_node);
         saveButton           = findViewById(R.id.config_save);
         cancelButton         = findViewById(R.id.config_cancel);
+
+        findViewById(R.id.config_dictionary_button).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startActivity(new Intent(ConfigActivity.this, DictionaryActivity.class));
+            }
+        });
 
         loadConfig();
 

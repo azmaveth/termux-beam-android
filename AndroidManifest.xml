@@ -58,6 +58,12 @@
             android:label="@string/settings"
             android:parentActivityName=".MainActivity" />
 
+        <activity
+            android:name=".DictionaryActivity"
+            android:exported="false"
+            android:label="Custom Dictionary"
+            android:parentActivityName=".ConfigActivity" />
+
         <service
             android:name=".BeamService"
             android:foregroundServiceType="dataSync|camera|microphone|location|phoneCall"
