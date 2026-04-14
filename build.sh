@@ -52,6 +52,7 @@ javac \
     "$PROJECT/src/com/example/beamapp/BootReceiver.java" \
     "$PROJECT/src/com/example/beamapp/BeamService.java" \
     "$PROJECT/src/com/example/beamapp/ConfigActivity.java" \
+    "$PROJECT/src/com/example/beamapp/DictionaryActivity.java" \
     "$PROJECT/src/com/example/beamapp/GemmaEngine.java" \
     "$PROJECT/src/com/example/beamapp/MainActivity.java"
 

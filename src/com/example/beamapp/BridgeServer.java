@@ -70,6 +70,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import android.util.Base64;
 
 /**
  * TCP bridge server that lets BEAM processes call Android APIs.
@@ -269,6 +270,7 @@ public class BridgeServer {
                 case "listen":         result = cmdListen(args); break;
                 case "pre_listen":     speechEngine.startPreRecord(); result = "\"ok\""; break;
                 case "stream_listen":  result = cmdStreamListen(args, id, out); break;
+                case "remote_listen":  result = cmdRemoteListen(args, id, out); break;
                 case "speech_status":  result = speechEngine.getStatus(); break;
                 case "transcribe_offline": result = cmdTranscribeOffline(args); break;
                 case "diarize":        result = cmdDiarize(args); break;
@@ -1130,6 +1132,52 @@ public class BridgeServer {
 
         String result = speechEngine.streamListen(maxDuration, callback);
         /* Return null — we send final response directly for streaming commands */
+        if (writer != null) {
+            String finalResponse = "{\"id\":" + msgId + ",\"ok\":true,\"data\":" + result + "}";
+            synchronized (writer) {
+                writer.println(finalResponse);
+                writer.flush();
+            }
+            return null;
+        }
+        return result;
+    }
+
+    /**
+     * Remote-listen: record from mic, use VAD to segment speech, send each
+     * utterance as base64-encoded WAV via JSON lines.
+     * Args: max duration in seconds (default 30).
+     * Protocol: sends {"id":N,"chunk":I,"audio":"base64...","duration":X.X}
+     * per utterance, then final {"id":N,"ok":true,"data":{...}}.
+     */
+    private String cmdRemoteListen(String args, final String msgId, final PrintWriter writer) {
+        int maxDuration = parseInt(args, 30);
+
+        SpeechEngine.AudioChunkCallback callback = null;
+        if (writer != null) {
+            callback = new SpeechEngine.AudioChunkCallback() {
+                @Override
+                public void onChunk(byte[] wavBytes, int chunkIndex, float durationSec) {
+                    String b64 = Base64.encodeToString(wavBytes, Base64.NO_WRAP);
+                    String msg = "{\"id\":" + msgId
+                        + ",\"chunk\":" + chunkIndex
+                        + ",\"audio\":\"" + b64 + "\""
+                        + ",\"duration\":" + String.format("%.2f", durationSec)
+                        + ",\"bytes\":" + wavBytes.length + "}";
+                    synchronized (writer) {
+                        writer.println(msg);
+                        writer.flush();
+                    }
+                }
+
+                @Override
+                public void onDone(int totalChunks, long elapsedMs) {
+                    // Final response sent below
+                }
+            };
+        }
+
+        String result = speechEngine.remoteStreamListen(maxDuration, callback);
         if (writer != null) {
             String finalResponse = "{\"id\":" + msgId + ",\"ok\":true,\"data\":" + result + "}";
             synchronized (writer) {

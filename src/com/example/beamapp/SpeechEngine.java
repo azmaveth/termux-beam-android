@@ -1211,4 +1211,220 @@ public class SpeechEngine {
     public interface PartialCallback {
         void onPartial(String text);
     }
+
+    /**
+     * Callback for delivering completed audio chunks (WAV bytes) during
+     * remote-ASR streaming. Called once per VAD-detected utterance.
+     */
+    public interface AudioChunkCallback {
+        void onChunk(byte[] wavBytes, int chunkIndex, float durationSec);
+        void onDone(int totalChunks, long elapsedMs);
+    }
+
+    /**
+     * Record from mic using VAD to segment speech into utterances.
+     * Each completed utterance is delivered as WAV bytes via the callback.
+     * Designed for remote ASR: the caller sends each chunk to a GPU node.
+     *
+     * @param maxDurationSec  max total recording time
+     * @param callback        receives WAV bytes for each utterance
+     * @return final status JSON
+     */
+    @SuppressWarnings("MissingPermission")
+    public String remoteStreamListen(int maxDurationSec, AudioChunkCallback callback) {
+        if (vad == null) return "{\"error\":\"VAD not initialized\"}";
+
+        listening.set(true);
+        long startTime = System.currentTimeMillis();
+        long maxMs = maxDurationSec * 1000L;
+
+        // Take over pre-record mic if available
+        float[][] lookbackHolder = new float[1][];
+        AudioRecord mic = takePreRecordMic(lookbackHolder);
+        float[] lookback = lookbackHolder[0];
+
+        try {
+            if (mic == null) {
+                int bufSize = Math.max(
+                    AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
+                        AudioFormat.ENCODING_PCM_16BIT),
+                    SAMPLE_RATE * 2);
+                mic = new AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize);
+                if (mic.getState() != AudioRecord.STATE_INITIALIZED) {
+                    mic.release();
+                    return "{\"error\":\"mic not available\"}";
+                }
+                mic.startRecording();
+            }
+
+            vad.reset();
+
+            // Accumulate audio samples for current utterance
+            // Pre-allocate for up to 30s of audio (will grow if needed)
+            float[] utteranceBuf = new float[SAMPLE_RATE * 30];
+            int utteranceLen = 0;
+            boolean inSpeech = false;
+            int chunkIndex = 0;
+            int vadWindow = 512;
+            float[] vadBuf = new float[vadWindow];
+            int vadBufPos = 0;
+
+            // Feed lookback audio through VAD first
+            if (lookback != null && lookback.length > 0) {
+                int pos = 0;
+                while (pos < lookback.length) {
+                    int toCopy = Math.min(lookback.length - pos, vadWindow - vadBufPos);
+                    System.arraycopy(lookback, pos, vadBuf, vadBufPos, toCopy);
+                    vadBufPos += toCopy;
+                    pos += toCopy;
+                    if (vadBufPos == vadWindow) {
+                        vad.acceptWaveform(vadBuf);
+                        if (vad.isSpeechDetected()) {
+                            inSpeech = true;
+                            if (utteranceLen + vadWindow > utteranceBuf.length) {
+                                utteranceBuf = Arrays.copyOf(utteranceBuf, utteranceBuf.length * 2);
+                            }
+                            System.arraycopy(vadBuf, 0, utteranceBuf, utteranceLen, vadWindow);
+                            utteranceLen += vadWindow;
+                        } else if (inSpeech) {
+                            // Silence after speech — emit chunk
+                            if (utteranceLen > SAMPLE_RATE / 4) { // min 250ms
+                                byte[] wav = samplesToWav(utteranceBuf, utteranceLen);
+                                if (callback != null) {
+                                    callback.onChunk(wav, chunkIndex,
+                                        (float) utteranceLen / SAMPLE_RATE);
+                                }
+                                chunkIndex++;
+                            }
+                            utteranceLen = 0;
+                            inSpeech = false;
+                            vad.reset();
+                        }
+                        vadBufPos = 0;
+                    }
+                }
+            }
+
+            short[] rawBuf = new short[SAMPLE_RATE / 10]; // 100ms reads
+            float[] floatBuf = new float[rawBuf.length];
+
+            while (listening.get() && (System.currentTimeMillis() - startTime) < maxMs) {
+                int read = mic.read(rawBuf, 0, rawBuf.length);
+                if (read <= 0) continue;
+
+                for (int i = 0; i < read; i++) {
+                    floatBuf[i] = rawBuf[i] / 32768.0f;
+                }
+
+                int pos = 0;
+                while (pos < read) {
+                    int toCopy = Math.min(read - pos, vadWindow - vadBufPos);
+                    System.arraycopy(floatBuf, pos, vadBuf, vadBufPos, toCopy);
+                    vadBufPos += toCopy;
+                    pos += toCopy;
+
+                    if (vadBufPos == vadWindow) {
+                        vad.acceptWaveform(vadBuf);
+                        if (vad.isSpeechDetected()) {
+                            inSpeech = true;
+                            if (utteranceLen + vadWindow > utteranceBuf.length) {
+                                utteranceBuf = Arrays.copyOf(utteranceBuf, utteranceBuf.length * 2);
+                            }
+                            System.arraycopy(vadBuf, 0, utteranceBuf, utteranceLen, vadWindow);
+                            utteranceLen += vadWindow;
+                        } else if (inSpeech) {
+                            // Silence after speech — emit this utterance
+                            if (utteranceLen > SAMPLE_RATE / 4) { // min 250ms
+                                byte[] wav = samplesToWav(utteranceBuf, utteranceLen);
+                                if (callback != null) {
+                                    callback.onChunk(wav, chunkIndex,
+                                        (float) utteranceLen / SAMPLE_RATE);
+                                }
+                                chunkIndex++;
+                            }
+                            utteranceLen = 0;
+                            inSpeech = false;
+                            vad.reset();
+                        }
+                        vadBufPos = 0;
+                    }
+                }
+            }
+
+            // Flush remaining audio if we were mid-speech
+            if (utteranceLen > SAMPLE_RATE / 4) {
+                byte[] wav = samplesToWav(utteranceBuf, utteranceLen);
+                if (callback != null) {
+                    callback.onChunk(wav, chunkIndex,
+                        (float) utteranceLen / SAMPLE_RATE);
+                }
+                chunkIndex++;
+            }
+
+            long elapsed = System.currentTimeMillis() - startTime;
+            if (callback != null) {
+                callback.onDone(chunkIndex, elapsed);
+            }
+
+            return "{\"status\":\"ok\",\"chunks\":" + chunkIndex
+                + ",\"elapsed_ms\":" + elapsed + "}";
+        } catch (Exception e) {
+            Log.e(TAG, "Remote stream listen failed", e);
+            return "{\"error\":\"" + escJson(e.getMessage()) + "\"}";
+        } finally {
+            listening.set(false);
+            if (mic != null) {
+                try { mic.stop(); } catch (Exception ignored) {}
+                mic.release();
+            }
+        }
+    }
+
+    /** Convert float samples to a 16-bit mono WAV byte array. */
+    private byte[] samplesToWav(float[] samples, int length) {
+        int dataLen = length * 2;
+        int totalLen = 44 + dataLen;
+        byte[] wav = new byte[totalLen];
+
+        // RIFF header
+        wav[0] = 'R'; wav[1] = 'I'; wav[2] = 'F'; wav[3] = 'F';
+        intToLe(totalLen - 8, wav, 4);
+        wav[8] = 'W'; wav[9] = 'A'; wav[10] = 'V'; wav[11] = 'E';
+
+        // fmt chunk
+        wav[12] = 'f'; wav[13] = 'm'; wav[14] = 't'; wav[15] = ' ';
+        intToLe(16, wav, 16);          // chunk size
+        shortToLe(1, wav, 20);         // PCM
+        shortToLe(1, wav, 22);         // mono
+        intToLe(SAMPLE_RATE, wav, 24); // sample rate
+        intToLe(SAMPLE_RATE * 2, wav, 28); // byte rate
+        shortToLe(2, wav, 32);         // block align
+        shortToLe(16, wav, 34);        // bits per sample
+
+        // data chunk
+        wav[36] = 'd'; wav[37] = 'a'; wav[38] = 't'; wav[39] = 'a';
+        intToLe(dataLen, wav, 40);
+
+        // PCM samples
+        for (int i = 0; i < length; i++) {
+            float s = Math.max(-1.0f, Math.min(1.0f, samples[i]));
+            short pcm = (short) (s * 32767);
+            wav[44 + i * 2] = (byte) (pcm & 0xFF);
+            wav[44 + i * 2 + 1] = (byte) ((pcm >> 8) & 0xFF);
+        }
+        return wav;
+    }
+
+    private static void intToLe(int val, byte[] buf, int off) {
+        buf[off]     = (byte) (val & 0xFF);
+        buf[off + 1] = (byte) ((val >> 8) & 0xFF);
+        buf[off + 2] = (byte) ((val >> 16) & 0xFF);
+        buf[off + 3] = (byte) ((val >> 24) & 0xFF);
+    }
+
+    private static void shortToLe(int val, byte[] buf, int off) {
+        buf[off]     = (byte) (val & 0xFF);
+        buf[off + 1] = (byte) ((val >> 8) & 0xFF);
+    }
 }

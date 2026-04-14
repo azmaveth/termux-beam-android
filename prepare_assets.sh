@@ -144,6 +144,8 @@ erlc -o "$ASSETS/lib/android/ebin" "$PROJECT/erlang_src/gemma.erl"
 erlc -o "$ASSETS/lib/android/ebin" "$PROJECT/erlang_src/eval.erl"
 erlc -o "$ASSETS/lib/android/ebin" "$PROJECT/erlang_src/cluster.erl"
 erlc -o "$ASSETS/lib/android/ebin" "$PROJECT/erlang_src/reconnect.erl"
+erlc -o "$ASSETS/lib/android/ebin" "$PROJECT/erlang_src/asr_test.erl"
+erlc -o "$ASSETS/lib/android/ebin" "$PROJECT/erlang_src/remote_asr.erl"
 
 echo "=== Assets prepared ==="
 du -sh "$LIBDIR"
