@@ -1032,11 +1032,27 @@ public class SpeechEngine {
             StringBuilder allText = new StringBuilder();
 
             // VAD gating: accumulate chunks into 512-sample windows
+            // Pre-roll: keep a ring buffer of recent silence frames so that when
+            // speech is first detected, we flush the last ~480ms of audio to the
+            // recognizer. Without this, the attack of the first word is lost
+            // because VAD needs some energy to confirm speech.
+            //
+            // Hysteresis: once in speech, keep forwarding audio for ~320ms after
+            // VAD first reports silence. This captures trailing consonants and
+            // short inter-word pauses that would otherwise be clipped.
             boolean useVad = (vad != null);
             int vadWindow = 512;
             float[] vadBuf = useVad ? new float[vadWindow] : null;
             int vadBufPos = 0;
             int vadSpeechFrames = 0, vadSilenceFrames = 0;
+            // Pre-roll ring buffer: 15 * 512 samples @ 16kHz = ~480ms lookback
+            final int preRollFrames = 15;
+            float[][] preRoll = useVad ? new float[preRollFrames][] : null;
+            int preRollPos = 0;
+            // Hysteresis: grace period of silence frames that still forward audio
+            final int silenceGraceThreshold = 10; // ~320ms @ 16kHz, 512 samples per frame
+            boolean inSpeech = false;
+            int silenceGraceFrames = 0;
             if (useVad) vad.reset();
 
             while (listening.get() && source.isActive()
@@ -1062,9 +1078,36 @@ public class SpeechEngine {
                         if (vadBufPos == vadWindow) {
                             vad.acceptWaveform(vadBuf);
                             if (vad.isSpeechDetected()) {
+                                if (!inSpeech) {
+                                    // Silence → speech transition: flush pre-roll so
+                                    // the recognizer sees the word attack, not just the
+                                    // already-established vowel.
+                                    for (int i = 0; i < preRollFrames; i++) {
+                                        int idx = (preRollPos + i) % preRollFrames;
+                                        if (preRoll[idx] != null) {
+                                            stream.acceptWaveform(preRoll[idx], SAMPLE_RATE);
+                                        }
+                                    }
+                                    inSpeech = true;
+                                }
                                 vadSpeechFrames++;
-                                stream.acceptWaveform(vadBuf, SAMPLE_RATE);
+                                stream.acceptWaveform(vadBuf.clone(), SAMPLE_RATE);
+                                silenceGraceFrames = 0;
                             } else {
+                                // Silence frame
+                                if (inSpeech && silenceGraceFrames < silenceGraceThreshold) {
+                                    // Trailing grace period — keep forwarding so we
+                                    // don't clip trailing consonants or short pauses.
+                                    stream.acceptWaveform(vadBuf.clone(), SAMPLE_RATE);
+                                    silenceGraceFrames++;
+                                } else {
+                                    inSpeech = false;
+                                }
+                                // Always update the pre-roll ring buffer with this
+                                // silence frame so we have lookback for the next
+                                // speech onset.
+                                preRoll[preRollPos] = vadBuf.clone();
+                                preRollPos = (preRollPos + 1) % preRollFrames;
                                 vadSilenceFrames++;
                             }
                             vadBufPos = 0;
@@ -1107,14 +1150,19 @@ public class SpeechEngine {
                         String.format("%.1f%%", 100.0 * vadSpeechFrames / (vadSpeechFrames + vadSilenceFrames)) : "N/A"));
             }
 
-            // Flush any remaining partial VAD buffer
+            // Flush any remaining partial VAD buffer.
+            // If we were in speech (or grace period), forward the partial window
+            // even if it's technically silence — it's part of the trailing edge
+            // of the last utterance.
             if (useVad && vadBufPos > 0) {
                 // Pad with zeros to fill the window
                 for (int i = vadBufPos; i < vadWindow; i++) vadBuf[i] = 0;
                 vad.acceptWaveform(vadBuf);
-                if (vad.isSpeechDetected()) {
+                if (vad.isSpeechDetected() || inSpeech) {
                     vadSpeechFrames++;
                     stream.acceptWaveform(vadBuf, SAMPLE_RATE);
+                } else {
+                    vadSilenceFrames++;
                 }
             }
 
