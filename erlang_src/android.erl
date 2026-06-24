@@ -119,9 +119,11 @@ network_info() -> call(<<"network_info">>).
 location() -> call(<<"location">>).
 %% Active GPS fix: waits for a live satellite fix (optional timeout seconds,
 %% default 15), falling back to last-known. Includes satellites/age_ms/stale.
-gps_fix() -> call(<<"gps_fix">>).
+%% gps_fix waits up to TimeoutSec for a live fix server-side, so the client
+%% gen_server:call timeout must exceed that (default Java timeout is 15s).
+gps_fix() -> call(<<"gps_fix">>, <<>>, 20000).
 gps_fix(TimeoutSec) when is_integer(TimeoutSec) ->
-    call(<<"gps_fix">>, integer_to_binary(TimeoutSec)).
+    call(<<"gps_fix">>, integer_to_binary(TimeoutSec), TimeoutSec * 1000 + 5000).
 
 %% ---- Apps ----
 
