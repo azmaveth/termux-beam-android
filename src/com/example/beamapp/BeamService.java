@@ -523,7 +523,28 @@ public class BeamService extends Service {
                         beamArgs.add("-setcookie"); beamArgs.add(cookie);
                         beamArgs.add("-kernel"); beamArgs.add("net_ticktime");
                         beamArgs.add("120");
-                        beamArgs.add("-kernel"); beamArgs.add("prevent_overlapping_partitions");
+                        /*
+                         * Edge/roaming node stability: stay OUT of the global
+                         * fully-connected mesh. On a flaky cellular/WiFi link, a
+                         * full mesh member makes `global` disconnect/reconnect every
+                         * cluster peer every few seconds ("to prevent overlapping
+                         * partitions"), destabilizing the WHOLE cluster, not just
+                         * this node.
+                         *
+                         *   -hidden           => excluded from global's mesh and its
+                         *                        partition detection; :erpc control of
+                         *                        the :android API still works.
+                         *   connect_all false => only the point-to-point links we
+                         *                        explicitly dial (the gateway in
+                         *                        BEAM_CLUSTER_NODES) — no transitive mesh.
+                         *
+                         * Replaces the prior `prevent_overlapping_partitions false`
+                         * workaround (which disabled a safety mechanism while still
+                         * fully meshing). As a hidden node the phone never triggers the
+                         * partition logic, so that flag is no longer needed.
+                         */
+                        beamArgs.add("-hidden");
+                        beamArgs.add("-kernel"); beamArgs.add("connect_all");
                         beamArgs.add("false");
                     }
 
