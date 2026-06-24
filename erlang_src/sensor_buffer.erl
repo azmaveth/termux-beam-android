@@ -120,26 +120,28 @@ max_seq() ->
 loop(#{seq := Seq, interval := Interval, max := Max} = St) ->
     receive
         sample ->
-            NewSeq = sample_all(Seq),
-            prune(Max),
+            %% Guard the cycle: a transient DETS error must not kill the buffer.
+            NewSeq = try sample_all(Seq)
+                     catch C:E -> io:format("[sensor_buffer] sample error ~p:~p~n", [C, E]), Seq end,
+            (catch prune(Max)),
             erlang:send_after(Interval, self(), sample),
             loop(St#{seq := NewSeq});
 
         {{fetch_since, Since}, From, Ref} ->
-            Entries = lists:sort(
-                        dets:select(?DETS,
-                          [{{'$1', '$2'}, [{'>', '$1', Since}], ['$_']}])),
-            Last = case Entries of
-                       [] -> Since;
-                       _ -> element(1, lists:last(Entries))
-                   end,
-            From ! {Ref, {ok, Last, Entries}},
+            Reply = try
+                        Es = lists:sort(dets:select(?DETS,
+                               [{{'$1', '$2'}, [{'>', '$1', Since}], ['$_']}])),
+                        Last = case Es of [] -> Since; _ -> element(1, lists:last(Es)) end,
+                        {ok, Last, Es}
+                    catch C:E -> {error, {C, E}} end,
+            From ! {Ref, Reply},
             loop(St);
 
         {{ack, UpTo}, From, Ref} ->
-            N = dets:select_delete(?DETS,
-                  [{{'$1', '_'}, [{'=<', '$1', UpTo}], [true]}]),
-            From ! {Ref, {ok, N}},
+            Reply = try {ok, dets:select_delete(?DETS,
+                          [{{'$1', '_'}, [{'=<', '$1', UpTo}], [true]}])}
+                    catch C:E -> {error, {C, E}} end,
+            From ! {Ref, Reply},
             loop(St);
 
         {status, From, Ref} ->
