@@ -29,7 +29,7 @@
 -export([toast/1, notify/2]).
 -export([clipboard_get/0, clipboard_set/1]).
 -export([sensors/0, sensor_list/0, sensor_start/1, sensor_read/1, sensor_stop/1]).
--export([wifi_info/0, network_info/0, location/0]).
+-export([wifi_info/0, network_info/0, location/0, gps_fix/0, gps_fix/1]).
 -export([packages/0, system_prop/1, memory_info/0, screen_brightness/0]).
 -export([ping/0]).
 %% Environment sensing + extras already implemented in BridgeServer/PhoneAPI,
@@ -117,6 +117,11 @@ sensor_stop(Type)  -> call(<<"sensor_stop">>,  sensor_type(Type)).
 wifi_info() -> call(<<"wifi_info">>).
 network_info() -> call(<<"network_info">>).
 location() -> call(<<"location">>).
+%% Active GPS fix: waits for a live satellite fix (optional timeout seconds,
+%% default 15), falling back to last-known. Includes satellites/age_ms/stale.
+gps_fix() -> call(<<"gps_fix">>).
+gps_fix(TimeoutSec) when is_integer(TimeoutSec) ->
+    call(<<"gps_fix">>, integer_to_binary(TimeoutSec)).
 
 %% ---- Apps ----
 

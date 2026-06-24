@@ -316,6 +316,7 @@ public class BridgeServer {
                 case "sms_inbox":      result = phoneAPI.smsInbox(args); break;
                 case "sms_send":       result = phoneAPI.smsSend(args); break;
                 case "telephony_info": result = phoneAPI.telephonyInfo(); break;
+                case "gps_fix":        result = phoneAPI.gpsFix(args); break;
                 case "media_play":     result = phoneAPI.mediaPlay(args); break;
                 case "media_stop":     result = phoneAPI.mediaStop(); break;
                 case "media_status":   result = phoneAPI.mediaStatus(); break;

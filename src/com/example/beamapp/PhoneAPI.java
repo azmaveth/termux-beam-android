@@ -18,6 +18,9 @@ import android.net.Uri;
 import android.net.wifi.ScanResult;
 import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.PowerManager;
@@ -528,6 +531,79 @@ public class PhoneAPI {
     /* ---- Telephony ---- */
 
     @SuppressWarnings("MissingPermission")
+    /* Active GPS fix — waits for a live satellite fix, falls back to last-known.
+       args: optional timeout in seconds (default 15, clamped 1..120). */
+    public String gpsFix(String args) {
+        int timeoutSec = 15;
+        try {
+            if (args != null && !args.trim().isEmpty()) {
+                timeoutSec = Integer.parseInt(args.trim());
+            }
+        } catch (Exception ignore) {}
+        if (timeoutSec < 1) timeoutSec = 1;
+        if (timeoutSec > 120) timeoutSec = 120;
+
+        LocationManager lm = (LocationManager) context.getSystemService(Context.LOCATION_SERVICE);
+        if (lm == null) return "{\"error\":\"no location manager\"}";
+
+        try {
+            if (!lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                return "{\"error\":\"gps provider disabled\"}";
+            }
+            final Location[] result = {null};
+            final CountDownLatch latch = new CountDownLatch(1);
+            HandlerThread ht = new HandlerThread("gpsfix");
+            ht.start();
+            LocationListener listener = new LocationListener() {
+                @Override public void onLocationChanged(Location loc) {
+                    result[0] = loc;
+                    latch.countDown();
+                }
+                @Override public void onProviderDisabled(String p) {}
+                @Override public void onProviderEnabled(String p) {}
+                @Override public void onStatusChanged(String p, int s, android.os.Bundle b) {}
+            };
+            lm.requestSingleUpdate(LocationManager.GPS_PROVIDER, listener, ht.getLooper());
+            boolean got = latch.await(timeoutSec, TimeUnit.SECONDS);
+            try { lm.removeUpdates(listener); } catch (Exception ignore) {}
+            ht.quitSafely();
+
+            if (got && result[0] != null) {
+                return locJson(result[0], false);
+            }
+            // Fall back to last-known so the caller still gets something useful.
+            Location last = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+            if (last == null) last = lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
+            if (last == null) return "{\"error\":\"no fix within timeout and no last-known\"}";
+            return locJson(last, true);
+        } catch (SecurityException e) {
+            return "{\"error\":\"location permission denied\"}";
+        } catch (Exception e) {
+            return "{\"error\":\"" + esc(String.valueOf(e.getMessage())) + "\"}";
+        }
+    }
+
+    private String locJson(Location loc, boolean stale) {
+        int sats = -1;
+        try {
+            android.os.Bundle ex = loc.getExtras();
+            if (ex != null) sats = ex.getInt("satellites", -1);
+        } catch (Exception ignore) {}
+        long ageMs = System.currentTimeMillis() - loc.getTime();
+        return "{\"latitude\":" + loc.getLatitude()
+            + ",\"longitude\":" + loc.getLongitude()
+            + ",\"altitude\":" + loc.getAltitude()
+            + ",\"accuracy\":" + loc.getAccuracy()
+            + ",\"speed\":" + loc.getSpeed()
+            + ",\"bearing\":" + loc.getBearing()
+            + ",\"satellites\":" + sats
+            + ",\"time\":" + loc.getTime()
+            + ",\"age_ms\":" + ageMs
+            + ",\"stale\":" + stale
+            + ",\"provider\":\"" + esc(String.valueOf(loc.getProvider())) + "\""
+            + "}";
+    }
+
     public String telephonyInfo() {
         try {
             TelephonyManager tm = (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
