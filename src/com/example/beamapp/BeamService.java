@@ -196,6 +196,10 @@ public class BeamService extends Service {
                         "{ok, _} = android:start_link(), " +
                         "io:format(\" connected!~n\"), " +
 
+                        /* Start store-and-forward sensor buffer (edge sensing node) */
+                        "catch sensor_buffer:start(), " +
+                        "io:format(\"SensorBuffer: store-and-forward sampling started~n\"), " +
+
                         /* Query device info */
                         "{ok, DevInfo} = android:device_info(), " +
                         "io:format(\"Device: ~s~n\", [DevInfo]), " +

@@ -32,6 +32,10 @@
 -export([wifi_info/0, network_info/0, location/0]).
 -export([packages/0, system_prop/1, memory_info/0, screen_brightness/0]).
 -export([ping/0]).
+%% Environment sensing + extras already implemented in BridgeServer/PhoneAPI,
+%% surfaced here so the BEAM can actually call them.
+-export([telephony_info/0, wifi_scan/0, screen_state/0, audio_info/0]).
+-export([process_info/0, camera_info/0, volume_get/0, media_status/0]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -121,6 +125,22 @@ packages() -> call(<<"packages">>).
 %% ---- Utility ----
 
 ping() -> call(<<"ping">>).
+
+%% ---- Environment sensing & extras (surfaced from existing bridge commands) ----
+
+%% Operator, network type, signal strength + serving & neighbor cell towers
+%% (PhoneAPI.telephonyInfo/0 uses getAllCellInfo) — this is the "cell tower scan".
+telephony_info() -> call(<<"telephony_info">>).
+%% Visible Wi-Fi APs (BSSID/SSID/level/freq), not just the connected one.
+wifi_scan()      -> call(<<"wifi_scan">>).
+%% Screen on/interactive — a coarse presence signal.
+screen_state()   -> call(<<"screen_state">>).
+%% Volume levels / audio routing (NOT mic content).
+audio_info()     -> call(<<"audio_info">>).
+process_info()   -> call(<<"process_info">>).
+camera_info()    -> call(<<"camera_info">>).
+volume_get()     -> call(<<"volume_get">>).
+media_status()   -> call(<<"media_status">>).
 
 %%% ============================================================
 %%% gen_server callbacks
