@@ -36,6 +36,7 @@
 %% surfaced here so the BEAM can actually call them.
 -export([telephony_info/0, wifi_scan/0, screen_state/0, audio_info/0]).
 -export([process_info/0, camera_info/0, volume_get/0, media_status/0]).
+-export([bt_scan/0, bt_scan/1, bt_scan_ble/0, bt_scan_ble/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -148,6 +149,16 @@ process_info()   -> call(<<"process_info">>).
 camera_info()    -> call(<<"camera_info">>).
 volume_get()     -> call(<<"volume_get">>).
 media_status()   -> call(<<"media_status">>).
+
+%% Bluetooth scans — both block for the scan duration, so use a client call
+%% timeout larger than the scan window (like gps_fix). Nearby devices + RSSI =
+%% RF presence/density signal.
+bt_scan() -> call(<<"bt_scan">>, <<>>, 12000).            %% classic discovery (~default secs)
+bt_scan(Secs) when is_integer(Secs) ->
+    call(<<"bt_scan">>, integer_to_binary(Secs), Secs * 1000 + 5000).
+bt_scan_ble() -> call(<<"bt_scan_ble">>, <<>>, 12000).    %% BLE scan (default 5s)
+bt_scan_ble(Secs) when is_integer(Secs) ->
+    call(<<"bt_scan_ble">>, integer_to_binary(Secs), Secs * 1000 + 5000).
 
 %%% ============================================================
 %%% gen_server callbacks

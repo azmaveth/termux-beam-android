@@ -36,7 +36,10 @@ sources() ->
      {motion,   fun() -> android:sensor_read(17) end},  %% significant-motion trigger
      {location, fun() -> android:location() end},       %% last-known fix
      {cell,     fun() -> android:telephony_info() end}, %% operator + serving/neighbor towers
-     {wifi_aps, fun() -> android:wifi_scan() end}].     %% visible APs
+     {wifi_aps, fun() -> android:wifi_scan() end},      %% visible APs
+     {battery,  fun() -> android:battery() end},        %% level/charging/temp/voltage (device health)
+     {network,  fun() -> android:network_info() end},   %% connectivity state over time
+     {ble,      fun() -> android:bt_scan_ble(6) end}].  %% nearby BLE devices (6s scan — the heavy one)
 
 %%% ============================================================
 %%% Public API
