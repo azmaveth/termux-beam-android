@@ -121,7 +121,7 @@ public class SpeechEngine {
             // Extract TTS model
             ttsModelDir = filesDir + "/tts-model";
             File ttsDir = new File(ttsModelDir);
-            File ttsMarker = new File(ttsDir, ".extracted_v1");
+            File ttsMarker = new File(ttsDir, ".extracted_v2");
             if (!ttsMarker.exists()) {
                 ttsDir.mkdirs();
                 String[] ttsFiles = context.getAssets().list("tts-model");
@@ -290,24 +290,22 @@ public class SpeechEngine {
         if (ttsModelDir == null) return;
         try {
             long t = System.currentTimeMillis();
-            File kittenModel = new File(ttsModelDir, "model.fp16.onnx");
-            if (!kittenModel.exists()) kittenModel = new File(ttsModelDir, "model.onnx");
-            if (!kittenModel.exists()) {
+            File vitsModel = new File(ttsModelDir, "model.onnx");
+            if (!vitsModel.exists()) {
                 Log.w(TAG, "No TTS model.onnx found in " + ttsModelDir);
                 return;
             }
 
-            OfflineTtsKittenModelConfig kitten = OfflineTtsKittenModelConfig.builder()
-                .setModel(kittenModel.getAbsolutePath())
-                .setVoices(ttsModelDir + "/voices.bin")
+            OfflineTtsVitsModelConfig vits = OfflineTtsVitsModelConfig.builder()
+                .setModel(vitsModel.getAbsolutePath())
                 .setTokens(ttsModelDir + "/tokens.txt")
                 .setDataDir(ttsModelDir + "/espeak-ng-data")
                 .setLengthScale(1.0f)
                 .build();
 
             OfflineTtsModelConfig modelConfig = OfflineTtsModelConfig.builder()
-                .setKitten(kitten)
-                .setNumThreads(2)
+                .setVits(vits)
+                .setNumThreads(4)
                 .setDebug(false)
                 .build();
 
