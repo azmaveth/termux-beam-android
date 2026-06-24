@@ -28,6 +28,15 @@ import android.provider.CallLog;
 import android.provider.ContactsContract;
 import android.provider.Settings;
 import android.telephony.CellInfo;
+import android.telephony.CellInfoGsm;
+import android.telephony.CellInfoLte;
+import android.telephony.CellInfoNr;
+import android.telephony.CellInfoWcdma;
+import android.telephony.CellIdentityGsm;
+import android.telephony.CellIdentityLte;
+import android.telephony.CellIdentityNr;
+import android.telephony.CellIdentityWcdma;
+import android.telephony.CellSignalStrength;
 import android.telephony.TelephonyManager;
 import android.util.Log;
 import android.util.Size;
@@ -626,11 +635,19 @@ public class PhoneAPI {
             sb.append(",\"network_type\":\"").append(networkStr).append("\"");
             sb.append(",\"sim_state\":\"").append(simStr).append("\"");
 
-            // Cell info
+            // Cell info — serving + neighbor towers with identity + signal
             try {
                 List<CellInfo> cells = tm.getAllCellInfo();
                 if (cells != null) {
                     sb.append(",\"cell_count\":").append(cells.size());
+                    sb.append(",\"cells\":[");
+                    for (int i = 0; i < cells.size(); i++) {
+                        if (i > 0) sb.append(",");
+                        sb.append(cellJson(cells.get(i)));
+                    }
+                    sb.append("]");
+                } else {
+                    sb.append(",\"cell_count\":0,\"cells\":[]");
                 }
             } catch (Exception e) {
                 sb.append(",\"cell_count\":-1");
@@ -642,6 +659,60 @@ public class PhoneAPI {
             return "{\"error\":\"" + esc(e.getMessage()) + "\"}";
         }
     }
+
+    /* Per-tower JSON: type + identity (mcc/mnc + cell id fields) + signal (dbm/level/asu).
+       Signal uses the generic CellSignalStrength (API 30+); identity is per-RAT. */
+    private String cellJson(CellInfo ci) {
+        StringBuilder b = new StringBuilder("{");
+        b.append("\"registered\":").append(ci.isRegistered());
+        try {
+            CellSignalStrength ss = ci.getCellSignalStrength();
+            b.append(",\"dbm\":").append(ss.getDbm());
+            b.append(",\"level\":").append(ss.getLevel());
+            b.append(",\"asu\":").append(ss.getAsuLevel());
+        } catch (Exception e) {}
+        if (ci instanceof CellInfoLte) {
+            CellIdentityLte id = ((CellInfoLte) ci).getCellIdentity();
+            b.append(",\"type\":\"LTE\"");
+            b.append(",\"mcc\":\"").append(esc(s(id.getMccString()))).append("\"");
+            b.append(",\"mnc\":\"").append(esc(s(id.getMncString()))).append("\"");
+            b.append(",\"ci\":").append(id.getCi());
+            b.append(",\"pci\":").append(id.getPci());
+            b.append(",\"tac\":").append(id.getTac());
+            b.append(",\"earfcn\":").append(id.getEarfcn());
+        } else if (ci instanceof CellInfoNr) {
+            CellIdentityNr id = (CellIdentityNr) ((CellInfoNr) ci).getCellIdentity();
+            b.append(",\"type\":\"NR\"");
+            b.append(",\"mcc\":\"").append(esc(s(id.getMccString()))).append("\"");
+            b.append(",\"mnc\":\"").append(esc(s(id.getMncString()))).append("\"");
+            b.append(",\"nci\":").append(id.getNci());
+            b.append(",\"pci\":").append(id.getPci());
+            b.append(",\"tac\":").append(id.getTac());
+            b.append(",\"nrarfcn\":").append(id.getNrarfcn());
+        } else if (ci instanceof CellInfoGsm) {
+            CellIdentityGsm id = ((CellInfoGsm) ci).getCellIdentity();
+            b.append(",\"type\":\"GSM\"");
+            b.append(",\"mcc\":\"").append(esc(s(id.getMccString()))).append("\"");
+            b.append(",\"mnc\":\"").append(esc(s(id.getMncString()))).append("\"");
+            b.append(",\"cid\":").append(id.getCid());
+            b.append(",\"lac\":").append(id.getLac());
+            b.append(",\"arfcn\":").append(id.getArfcn());
+        } else if (ci instanceof CellInfoWcdma) {
+            CellIdentityWcdma id = ((CellInfoWcdma) ci).getCellIdentity();
+            b.append(",\"type\":\"WCDMA\"");
+            b.append(",\"mcc\":\"").append(esc(s(id.getMccString()))).append("\"");
+            b.append(",\"mnc\":\"").append(esc(s(id.getMncString()))).append("\"");
+            b.append(",\"cid\":").append(id.getCid());
+            b.append(",\"lac\":").append(id.getLac());
+            b.append(",\"psc\":").append(id.getPsc());
+        } else {
+            b.append(",\"type\":\"").append(esc(ci.getClass().getSimpleName())).append("\"");
+        }
+        b.append("}");
+        return b.toString();
+    }
+
+    private static String s(String v) { return v == null ? "" : v; }
 
     private String networkTypeStr(int type) {
         switch (type) {
