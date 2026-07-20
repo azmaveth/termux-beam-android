@@ -115,6 +115,22 @@ public class GemmaEngine {
             String textName   = parts.length > 0 ? parts[0].trim() : "cpu";
             String visionName = parts.length > 1 ? parts[1].trim() : textName;
             String audioName  = parts.length > 2 ? parts[2].trim() : textName;
+
+            /* "auto": let the model declare its own modalities via the
+             * single-argument constructor.
+             *
+             * Naming every backend explicitly forces the runtime to wire up all
+             * three, so a text-only bundle fails at session creation with
+             * "NOT_FOUND: TF_LITE_AUDIO_ENCODER_HW not found in the model" —
+             * we asked for an audio encoder the model doesn't contain. Needed
+             * for Granite and any other text-only model; multimodal Gemma is
+             * happy either way. */
+            if ("auto".equalsIgnoreCase(textName)) {
+                Log.i(TAG, "Backends: auto (model-declared modalities)");
+                initEngine(new EngineConfig(modelPath), modelPath, startMs);
+                return;
+            }
+
             Log.i(TAG, "Backends: text=" + textName
                      + " vision=" + visionName + " audio=" + audioName);
             /* litertlm 0.14.0 inserted maxNumImages before cacheDir:
@@ -135,23 +151,28 @@ public class GemmaEngine {
                 cacheDir.getAbsolutePath()
             );
 
-            try {
-                Engine e = new Engine(config);
-                e.initialize();
-                Session s = e.createSession(new SessionConfig());
-                this.engine = e;
-                this.session = s;
-                this.loadedModelPath = modelPath;
-                this.loadedAt = System.currentTimeMillis();
+            initEngine(config, modelPath, startMs);
+        }
+    }
 
-                long elapsedMs = System.currentTimeMillis() - startMs;
-                Log.i(TAG, "Loaded in " + elapsedMs + "ms: " + modelPath);
-            } catch (Throwable t) {
-                /* Best-effort cleanup on partial init. */
-                closeQuietly();
-                throw new RuntimeException(
-                    "LiteRT-LM load failed: " + t.getMessage(), t);
-            }
+    /** Build the engine + session from a prepared config. Caller holds the lock. */
+    private void initEngine(EngineConfig config, String modelPath, long startMs) {
+        try {
+            Engine e = new Engine(config);
+            e.initialize();
+            Session s = e.createSession(new SessionConfig());
+            this.engine = e;
+            this.session = s;
+            this.loadedModelPath = modelPath;
+            this.loadedAt = System.currentTimeMillis();
+
+            long elapsedMs = System.currentTimeMillis() - startMs;
+            Log.i(TAG, "Loaded in " + elapsedMs + "ms: " + modelPath);
+        } catch (Throwable t) {
+            /* Best-effort cleanup on partial init. */
+            closeQuietly();
+            throw new RuntimeException(
+                "LiteRT-LM load failed: " + t.getMessage(), t);
         }
     }
 
