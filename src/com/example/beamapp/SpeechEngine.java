@@ -641,6 +641,43 @@ public class SpeechEngine {
     }
 
     /**
+     * Encoder warm-up length. The online model emits nothing usable until it
+     * has seen roughly this much non-degenerate audio — and digital silence
+     * does NOT count, because all-zero frames give degenerate log-mel
+     * features that never let the encoder settle. Measured on-device with one
+     * fixed utterance ("The quick brown fox jumps over the lazy dog"):
+     *
+     *   no padding        -> "S over the Lazy do"
+     *   +2.5s digital sil -> "S jumps over the Lazy Dog"   (still broken)
+     *   +2.5s dither      -> "The quick brown fox jumps over the lazy dog"
+     *
+     * Room tone counts only partially (a real recording with 1.7 s of room
+     * noise still lost its first word), so we prepend synthetic dither rather
+     * than relying on ambient noise or a bigger pre-roll buffer.
+     */
+    private static final int WARMUP_MS = 2500;
+
+    /**
+     * Feed low-level dither so the encoder is warm before real audio arrives.
+     * The dither itself decodes to nothing, so it adds no spurious tokens.
+     */
+    private void warmUpStream(OnlineStream stream) {
+        int total = SAMPLE_RATE * WARMUP_MS / 1000;
+        int chunk = SAMPLE_RATE / 10;
+        float[] buf = new float[chunk];
+        for (int off = 0; off < total; off += chunk) {
+            int len = Math.min(chunk, total - off);
+            for (int i = 0; i < len; i++) {
+                buf[i] = (float) (Math.sin((off + i) / 8.0) * 12.0 / 32768.0);
+            }
+            stream.acceptWaveform(len == chunk ? buf : Arrays.copyOf(buf, len), SAMPLE_RATE);
+            while (recognizer.isReady(stream)) {
+                recognizer.decode(stream);
+            }
+        }
+    }
+
+    /**
      * Transcribe a WAV file with the streaming recognizer.
      *
      * An online recognizer has to be driven like a stream: fed in small
@@ -663,6 +700,7 @@ public class SpeechEngine {
             OnlineStream stream = recognizer.createStream();
             StringBuilder allText = new StringBuilder();
             try {
+                warmUpStream(stream);
                 int chunk = SAMPLE_RATE / 10;   // 100 ms, same as streamListen
                 for (int off = 0; off < samples.length; off += chunk) {
                     int end = Math.min(off + chunk, samples.length);
@@ -1081,6 +1119,7 @@ public class SpeechEngine {
             }
 
             stream = recognizer.createStream();
+            warmUpStream(stream);
 
             // Feed lookback buffer first (audio captured before this method was called)
             if (lookback != null && lookback.length > 0) {
@@ -1310,6 +1349,7 @@ public class SpeechEngine {
         acquireListenLock();
         try {
             stream = recognizer.createStream();
+            warmUpStream(stream);
 
             long startTime = System.currentTimeMillis();
             long maxMs = maxDurationSec * 1000L;

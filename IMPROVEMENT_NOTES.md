@@ -92,15 +92,56 @@ the transcript was still `"Ore is very cold to day"`. So the capture gap is
 real but is **not** the cause of the lost first word. Do not spend effort on
 pre-roll wiring expecting it to fix clipping; it won't.
 
-**Cause still unisolated.** An attempt to isolate it via the `stt` command
-failed because that command is itself broken (see below), so any conclusion
-drawn from `stt` — including an earlier hypothesis that the streaming model
-is simply inaccurate — is unsupported. What is established: the loss is
-reproducible on the live path, the audio reaching the recognizer is intact,
-and the offline model decodes the same audio perfectly. Next step would be
-feeding a known WAV through the online recognizer *with* proper endpoint
-accumulation (the `streamListen` external-audio path, SpeechEngine.java:1266),
-which no command currently exposes.
+**ROOT CAUSE FOUND (2026-07-20, after the `stt` fix made measurement
+possible): the online encoder needs ~2.5 s of warm-up audio, and digital
+silence does not count.**
+
+Repeating one fixed utterance back to back shows the output tracks length —
+it is not a fixed tail window, and everything after the first ~2.5 s is
+transcribed *perfectly*:
+
+```
+x1 ( 3.68s) : "S over the lazy"
+x2 ( 7.36s) : "S over the lazy dog, the quick brown fox jumps over the lazy"
+x3 (11.04s) : "S over the lazy dog, the quick brown fox jumps over the lazy
+               dog. The quick brown fox jumps over the lazy"
+```
+
+So **the model is fine.** What matters is the *content* of the lead-in, not
+just its length — all-zero frames give degenerate log-mel features and never
+settle the encoder:
+
+```
+no padding          : "S over the Lazy do"
++1.0s digital sil   : "S jumps over the lazy do"
++2.5s digital sil   : "S jumps over the Lazy Dog"      <- still broken
++4.0s digital sil   : "Ned Fox jumps over the lazy"
++2.5s quiet dither  : "The quick brown fox jumps over the lazy dog"  <- perfect
+```
+
+Confirmed on a real mic recording ("Baltimore is very cold today", 1.7 s of
+genuine room tone as lead-in):
+
+```
+as recorded (1.7s room tone) : "Or is very cold to day"
++1.0s dither  (2.7s total)   : "Or is very cold to day"
++2.5s dither  (4.2s total)   : "Baltimore is very cold to day"
+offline (control)            : "Baltimore is very cold today."
+```
+
+Room tone counts only partially (rms ~6.8 is barely above digital silence),
+which is why the 1.5 s pre-roll ring buffer was never going to be enough and
+why priming the mic didn't help. This also explains every other symptom:
+clips shorter than ~2.5 s sit entirely inside the warm-up and return `""`,
+and the live path loses exactly its first word.
+
+**Fix applied:** `warmUpStream()` feeds ~2.5 s of low-level dither into every
+freshly created `OnlineStream` (`transcribeFile`, `streamListen`,
+`streamFromExternalAudio`). The dither decodes to nothing, so it adds no
+spurious tokens. Cost is one-time compute per listen (~150-250 ms at the
+observed ~10x realtime), not added user-facing latency, since the mic is
+already buffering. Prefer this to enlarging the ring buffer: it is
+deterministic and doesn't depend on how noisy the room happens to be.
 
 ### New — `transcribeFile` / `stt` drops all but the last segment
 
