@@ -135,13 +135,42 @@ why priming the mic didn't help. This also explains every other symptom:
 clips shorter than ~2.5 s sit entirely inside the warm-up and return `""`,
 and the live path loses exactly its first word.
 
-**Fix applied:** `warmUpStream()` feeds ~2.5 s of low-level dither into every
-freshly created `OnlineStream` (`transcribeFile`, `streamListen`,
-`streamFromExternalAudio`). The dither decodes to nothing, so it adds no
-spurious tokens. Cost is one-time compute per listen (~150-250 ms at the
-observed ~10x realtime), not added user-facing latency, since the mic is
-already buffering. Prefer this to enlarging the ring buffer: it is
-deterministic and doesn't depend on how noisy the room happens to be.
+**Mitigation applied, but it is NOT a reliable fix.** `warmUpStream()` feeds
+~2.5 s of low-level dither into every freshly created `OnlineStream`
+(`transcribeFile`, `streamListen`, `streamFromExternalAudio`). It is confirmed
+to run (`elapsed_ms` rose ~300-400 -> 463) and it helps *sometimes*, but
+tested across several phrases with identical audio and only the padding
+varying, the result is erratic and non-monotonic:
+
+```
+"Baltimore is very cold today"   3.5s->"Ors very cold"
+                                 4.0s->"Or is very cold to"
+                                 5.0s->"Or is very cold to"   (never recovers)
+"Hello world this is a test..."  never recovers "Hello" at any padding
+"Send a message to the team..."  3.5s->"About to Morrow"
+                                 4.0s->"Send a message to the team about to"
+                                 5.0s->"About to"             (worse again)
+```
+
+A single-phrase sweep looked cleanly monotonic (2.5s bad → 3.5s first word
+recovered → 6.5s complete) and briefly suggested the answer was just a larger
+`WARMUP_MS`. Testing more phrases refuted that. **Do not simply raise
+`WARMUP_MS` and call it fixed.**
+
+Note also that TTS is stochastic (`noise_scale=0.667`), so `tts_file` yields
+different audio every call. Comparing across runs without regenerating from a
+single saved file produced two false conclusions during this session; always
+generate once and reuse.
+
+**Recommended direction instead — hybrid streaming/offline.** The offline
+SenseVoice recognizer has been correct on every sample tested here, on the
+exact audio the streaming model mangles, at ~200-400 ms for 2.5-5 s of audio
+(~10x realtime). The streaming model is only needed for incremental partials.
+So: keep the online recognizer driving live partials for UX, and produce the
+**final** transcript by running the offline recognizer over the captured
+samples. `streamListen` already has the audio in hand; the extra cost is one
+offline pass (~300 ms) at end-of-utterance. That removes onset unreliability
+from the result path entirely, rather than trying to pad around it.
 
 ### New — `transcribeFile` / `stt` drops all but the last segment
 
