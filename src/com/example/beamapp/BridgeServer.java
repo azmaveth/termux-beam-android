@@ -1538,12 +1538,15 @@ public class BridgeServer {
         if (raw.isEmpty()) {
             return "{\"error\":\"usage: gemma_load <path> [cpu|gpu]\"}";
         }
+        /* Backend spec is "text[,vision[,audio]]" — the model's per-modality
+         * constraints are not uniform, so all three must be reachable without
+         * a rebuild. e.g. "gpu", "gpu,gpu,cpu", "cpu". */
         String path = raw;
         String backend = "cpu";
         int sp = raw.lastIndexOf(' ');
         if (sp > 0) {
             String tail = raw.substring(sp + 1).trim();
-            if ("cpu".equalsIgnoreCase(tail) || "gpu".equalsIgnoreCase(tail)) {
+            if (tail.matches("(?i)(cpu|gpu|gpu_artisan)(,(cpu|gpu|gpu_artisan)){0,2}")) {
                 backend = tail.toLowerCase(Locale.US);
                 path = raw.substring(0, sp).trim();
             }

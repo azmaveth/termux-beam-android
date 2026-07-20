@@ -62,6 +62,13 @@ public class GemmaEngine {
         load(modelPath, "cpu");
     }
 
+    /** "cpu" (optional thread count is left to the runtime), "gpu", or "gpu_artisan". */
+    private static Backend backendFor(String name) {
+        if ("gpu".equalsIgnoreCase(name)) return new Backend.GPU();
+        if ("gpu_artisan".equalsIgnoreCase(name)) return new Backend.GpuArtisan();
+        return new Backend.CPU(null);
+    }
+
     /**
      * Load a model on a named backend: "cpu" (default) or "gpu".
      *
@@ -95,20 +102,25 @@ public class GemmaEngine {
              * Backend.GPU has a no-arg constructor (verified against
              * litertlm-android-0.10.0: Backend$GPU declares <init>()V and no
              * INSTANCE field, so it is a plain class, not a Kotlin object). */
-            boolean useGpu = "gpu".equalsIgnoreCase(backendName);
-            Backend textBackend = useGpu ? new Backend.GPU() : new Backend.CPU(null);
-            /* Vision/audio stay on CPU regardless. They are unused for
-             * text-only Gemma, and the model declares a per-modality backend
-             * constraint: passing GPU for audio fails engine creation with
-             * "Audio backend constraint mismatch. Model requires one of [cpu]
-             * but Audio backend is GPU". */
-            Backend auxBackend = new Backend.CPU(null);
-            Log.i(TAG, "Backend: text=" + (useGpu ? "GPU" : "CPU") + " vision/audio=CPU");
+            /* Per-modality backends. The model declares constraints per
+             * modality and they are not uniform — with all three on GPU the
+             * engine rejects audio ("Model requires one of [cpu] but Audio
+             * backend is GPU"); with vision on CPU it rejects the vision
+             * encoder ("must have exactly one signature but got 3"). Rather
+             * than guess-and-rebuild, the spec is "text[,vision[,audio]]",
+             * e.g. "gpu", "gpu,gpu,cpu", "cpu". Unspecified slots inherit the
+             * text backend. */
+            String[] parts = backendName.split(",");
+            String textName   = parts.length > 0 ? parts[0].trim() : "cpu";
+            String visionName = parts.length > 1 ? parts[1].trim() : textName;
+            String audioName  = parts.length > 2 ? parts[2].trim() : textName;
+            Log.i(TAG, "Backends: text=" + textName
+                     + " vision=" + visionName + " audio=" + audioName);
             EngineConfig config = new EngineConfig(
                 modelPath,
-                textBackend,            // text backend — the one that matters
-                auxBackend,             // vision backend (unused for Gemma text)
-                auxBackend,             // audio backend (must be CPU, see above)
+                backendFor(textName),
+                backendFor(visionName),
+                backendFor(audioName),
                 null,                   // maxNumTokens — library default
                 cacheDir.getAbsolutePath()
             );
