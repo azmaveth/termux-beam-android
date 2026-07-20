@@ -165,11 +165,31 @@ public class GemmaEngine {
      *
      * @throws IllegalStateException if no model is loaded
      */
+    /**
+     * Wrap a bare prompt in Gemma 4's chat template.
+     *
+     * The instruct model emits an immediate end-of-turn for un-templated
+     * input, which is why raw prompts returned {"text":""} while still
+     * burning 2-6 s of compute.
+     *
+     * Gemma 4's markers differ from Gemma 2/3 — there is no
+     * <start_of_turn>. Per chat_template.jinja in the litert-community repo,
+     * turns open with "<|turn>{role}\n" and close with "<turn|>\n" (the pipe
+     * flips sides), and generation is prompted with "<|turn>model\n".
+     *
+     * Passes through unchanged if the caller already supplied turn markers,
+     * so multi-turn conversations can be built up by the caller.
+     */
+    private static String applyChatTemplate(String prompt) {
+        if (prompt.contains("<|turn>")) return prompt;
+        return "<|turn>user\n" + prompt + "<turn|>\n<|turn>model\n";
+    }
+
     public String generate(String prompt) {
         synchronized (lock) {
             requireLoaded();
             List<InputData> inputs = Collections.<InputData>singletonList(
-                new InputData.Text(prompt));
+                new InputData.Text(applyChatTemplate(prompt)));
             try {
                 return session.generateContent(inputs);
             } catch (Throwable t) {
@@ -190,7 +210,7 @@ public class GemmaEngine {
         synchronized (lock) {
             requireLoaded();
             List<InputData> inputs = Collections.<InputData>singletonList(
-                new InputData.Text(prompt));
+                new InputData.Text(applyChatTemplate(prompt)));
 
             final CountDownLatch done = new CountDownLatch(1);
             final AtomicReference<Throwable> errorRef = new AtomicReference<Throwable>();
