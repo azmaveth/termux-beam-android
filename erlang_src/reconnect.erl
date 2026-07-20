@@ -14,6 +14,7 @@
 
 -define(INITIAL_DELAY, 3000).   %% 3 seconds before first retry
 -define(RETRY_INTERVAL, 10000). %% 10 seconds between retries
+-define(SWEEP_INTERVAL, 30000). %% level-triggered safety net (see init/1)
 -define(MAX_RETRIES, 0).        %% 0 = infinite
 
 start() ->
@@ -59,7 +60,16 @@ status() ->
 %%% Internal
 
 init(TargetNodes) ->
-    net_kernel:monitor_nodes(true, [{node_type, visible}]),
+    %% {node_type, all} — NOT visible. The phone runs with -hidden, and every
+    %% connection a hidden node has is a *hidden* connection on both ends. A
+    %% `visible` subscription therefore never delivers a single nodeup or
+    %% nodedown here, which left this daemon entirely inert: the {nodedown, _}
+    %% clause below was dead code and nothing was ever reconnected.
+    net_kernel:monitor_nodes(true, [{node_type, all}]),
+    %% monitor_nodes is edge-triggered. On a mobile link a silent drop can take
+    %% a full net_ticktime (120 s) to surface, and a missed edge would strand
+    %% the node forever. The sweep below is the level-triggered backstop.
+    erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
     loop(TargetNodes, #{}, 0).
 
 loop(Targets, Retrying, ReconnectCount) ->
@@ -99,8 +109,32 @@ loop(Targets, Retrying, ReconnectCount) ->
                     loop(Targets, maps:put(Node, Attempt, Retrying), ReconnectCount)
             end;
 
+        %% Level-triggered backstop: re-ping every target that isn't currently
+        %% connected, whether or not we ever saw a nodedown for it. Cheap
+        %% (net_adm:ping on an established link is a no-op) and it makes
+        %% recovery independent of the edge actually firing.
+        sweep ->
+            Connected0 = nodes(connected),
+            Missing = [N || N <- Targets, not lists:member(N, Connected0)],
+            {Retrying1, Count1} =
+                lists:foldl(
+                  fun(Node, {R, C}) ->
+                      case net_adm:ping(Node) of
+                          pong ->
+                              io:format("[reconnect] sweep reconnected ~s~n", [Node]),
+                              {maps:remove(Node, R), C + 1};
+                          pang ->
+                              {R, C}
+                      end
+                  end, {Retrying, ReconnectCount}, Missing),
+            erlang:send_after(?SWEEP_INTERVAL, self(), sweep),
+            loop(Targets, Retrying1, Count1);
+
         {status, From} ->
-            Connected = nodes(),
+            %% nodes(connected), not nodes(): a hidden node's peers never show
+            %% up in nodes(), so this used to report every target as down even
+            %% while the link was live and carrying RPCs.
+            Connected = nodes(connected),
             Down = [N || N <- Targets, not lists:member(N, Connected)],
             From ! {reconnect_status, #{
                 targets => Targets,
