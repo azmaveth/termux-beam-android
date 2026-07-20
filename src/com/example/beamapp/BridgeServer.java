@@ -1536,7 +1536,8 @@ public class BridgeServer {
          * driver can be retried on CPU without a rebuild. */
         String raw = unquote(args).trim();
         if (raw.isEmpty()) {
-            return "{\"error\":\"usage: gemma_load <path> [cpu|gpu]\"}";
+            return "{\"error\":\"usage: gemma_load <path> [text[,vision[,audio]]]"
+                 + " where each is cpu|gpu|gpu_artisan\"}";
         }
         /* Backend spec is "text[,vision[,audio]]" — the model's per-modality
          * constraints are not uniform, so all three must be reachable without
