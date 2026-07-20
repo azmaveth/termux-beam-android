@@ -4,6 +4,319 @@ Things noticed while working in the code, not yet fixed (unless marked).
 Companion to VOICE_REVIEW.md (the original prioritized review). Add to this
 file as new items surface.
 
+## Round 7 (2026-07-20) — the on-device checklist run
+
+Ran the 10-item checklist at the bottom of this file against the live phone
+(`beamapp@10.42.42.205`, OTP 29). Results, then what it turned up.
+
+### How to reach the phone (read this first — it cost an hour)
+
+The phone starts with `-hidden` + `-kernel connect_all false`
+(BeamService.java:557-585). Consequences that are easy to misread as "the
+node is down":
+
+- **A hidden node never appears in `nodes()`.** `mix arbor.cluster` uses
+  visible nodes only, so it will *never* list the phone no matter how
+  healthy it is. Use `nodes(hidden)` or `nodes(connected)` — and only on the
+  one node the phone actually dialed, since hidden links aren't transitive.
+  Verified locally: from the hidden side, `nodes()` and `nodes(visible)` are
+  both `[]` while `nodes(connected)` shows the peer.
+- **`connect_all false` means one gateway and no fallback.** If the node in
+  `cluster_nodes` (`/sdcard/.beam-config`, BeamService.java:34) is down, the
+  phone is isolated with no transitive path.
+- Driving it from a third box: nested rpc through the gateway —
+  `rpc:call(Arbor, rpc, call, [Phone, M, F, A, T], T+N)`. This is the
+  production path and adds no new links to the phone.
+
+### Checklist outcomes
+
+| # | Item | Result |
+|---|------|--------|
+| 1 | New code on device | PASS (confirmed by behavior, not by rebuild) |
+| 2 | `stream_listen` `once:true` | PASS — 4654 ms of an 8000 ms window |
+| 3 | `stop_listen` + async dispatch | PARTIAL — buddie half needs earbuds |
+| 4 | `speak` / `tts_stop` / JSON args | PASS |
+| 5 | STT error path | INCONCLUSIVE — needs a restart, see below |
+| 6 | remote_asr chunking | BLOCKED — no remote ASR service exists |
+| 7 | Speaker JNI symbols | **RESOLVED** — extractor loads, dim=512 |
+| 8 | Mic contention | PASS — `mic busy (stream_listen)` |
+| 9 | `buddie_status` fields | PASS — echo half needs earbuds |
+| 10 | Auth (9877 + 9876) | PASS |
+
+Detail worth keeping:
+
+- **#2**: `8 once` returned at 4654 ms with `utterance_end_ts` non-zero; the
+  control (`8`, no once) ran the full 8315 ms with `utterance_end_ts: 0`.
+  Both the flag plumbing (`listen_args/2` → `"8 once"` → `parseListenOnce`)
+  and the `stopAtEndpoint` break (SpeechEngine.java:1109-1118) are correct.
+- **#4**: `"cancelled"` is the status of the *interrupted `tts` call*
+  (SpeechEngine.java:608); `tts_stop`'s own ack is `{"status":"stopping"}`.
+  The checklist wording is ambiguous about which. JSON-args regression is
+  objectively dead — the reply echoes the text actually spoken:
+  `"2 1.5 million dollars"` (duration 1.9) vs `"million dollars"` (1.1).
+- **#7**: `Java_..._SpeakerEmbeddingExtractor_newFromFile` fires, extractor
+  loads in ~2.5 s, dim=512, enroll/list/forget round-trips clean. **This
+  closes the round-2 "JNI symbols unverified" item.**
+- **#10**: 9877 unauthenticated → `{"ok":false,"error":"auth required"}`;
+  9876 unauthenticated → `ERROR: auth required`; with token → `ok` then `2`.
+  The "Bridge auth token generated" log line only appears on *generation*
+  (BridgeServer.java:178-186), so a persisted token means no log line —
+  absence is not a failure.
+
+### New — first-syllable clipping was NOT fixed
+
+The VAD/pre-roll clipping is still live, and the diagnosis is now exact.
+Same phrase ("Baltimore is very cold today") through each path:
+
+| Path | Transcript |
+|------|-----------|
+| cold `stream_listen` | `"'s very cold to day"` |
+| `pre_listen` 0.3 s then handoff | `"Or is very cold to day"` |
+| `pre_listen` 1.5 s (buffer full) then handoff | `"Ore is very cold to day"` |
+| `transcribe_offline` on a WAV with 1.7 s lead-in | `"Baltimore is very cold today."` |
+
+The offline path is perfect, so the audio is fine — the streaming path loses
+the onset. Two facts, both verified:
+
+1. **Cold `stream_listen` has zero pre-roll.** The mic opens when the call
+   arrives (SpeechEngine.java:1042-1049); anything already spoken is gone.
+   The 1.5 s ring buffer (SpeechEngine.java:912-913) only exists if
+   `pre_listen` ran first, and it does work — `Fed 24000 lookback samples
+   (1.5s)`.
+2. **`Voice.stream_listen` never calls `pre_listen`**, so the arbor
+   production path is *always* the cold path.
+
+**But priming the mic does NOT fix it — tested, negative result.** With
+`pre_listen` started *before* the cue (mic warm, full 1.5 s lookback fed),
+the transcript was still `"Ore is very cold to day"`. So the capture gap is
+real but is **not** the cause of the lost first word. Do not spend effort on
+pre-roll wiring expecting it to fix clipping; it won't.
+
+**Cause still unisolated.** An attempt to isolate it via the `stt` command
+failed because that command is itself broken (see below), so any conclusion
+drawn from `stt` — including an earlier hypothesis that the streaming model
+is simply inaccurate — is unsupported. What is established: the loss is
+reproducible on the live path, the audio reaching the recognizer is intact,
+and the offline model decodes the same audio perfectly. Next step would be
+feeding a known WAV through the online recognizer *with* proper endpoint
+accumulation (the `streamListen` external-audio path, SpeechEngine.java:1266),
+which no command currently exposes.
+
+### New — `transcribeFile` / `stt` drops all but the last segment
+
+`transcribeFile` (SpeechEngine.java, reached via the `stt` command) feeds the
+whole file, calls `inputFinished()`, decodes, then calls `getResult()`
+**once**. It never checks `isEndpoint` and never accumulates — unlike
+`streamListen`, which does exactly that at lines 1109-1120. Every segment
+finalized before end-of-file is silently lost.
+
+Measured on synthetic TTS audio (`tts_file` → `stt` vs `transcribe_offline`):
+
+```
+"Baltimore"                     stt=""              offline="Baltimore."
+"Hello"                         stt=""              offline="Hello."
+"one two three ... eight"       stt=""              offline="1,2,...,8."
+"the quick brown fox"           stt="Orn Fox"       offline="The quick brown fox."
+"the quick brown fox jumps
+ over the lazy dog"             stt="'s jumps over the Lazy"
+```
+
+**It is not the endpoints** — trimming trailing silence changes nothing:
+
+```
+"Baltimore"    untrimmed=""   trimmed=""
+"Hello"        untrimmed=""   trimmed=""
+"hello world"  untrimmed="O"  trimmed="O"
+"The quick brown fox jumps over the lazy dog"  ->  "S over the Lazy do"
+```
+
+Only roughly the **final ~1-1.5 s** ever decodes, and audio shorter than that
+yields nothing at all. That is the signature of pushing a whole file into a
+*streaming* recognizer in one shot: `transcribeFile` does
+
+```java
+stream.acceptWaveform(samples, SAMPLE_RATE);   // entire file, one call
+stream.inputFinished();
+while (recognizer.isReady(stream)) recognizer.decode(stream);
+```
+
+whereas `streamListen` feeds 100 ms chunks and decodes incrementally inside
+the read loop — the correct usage for an online model. Fix `transcribeFile`
+to do the same (chunked feed + incremental decode, plus endpoint
+accumulation), not merely to add endpoint handling.
+
+**Consequence for diagnosis: `stt` results say nothing about model quality.**
+Any earlier conclusion drawn from `stt` — including "the streaming model is
+inaccurate" — is void. Conversely, `streamListen` *does* drive the model
+correctly, and there it produces mostly-right output with only the first word
+wrong (`"Baltimore is very cold today"` → `"Ore is very cold to day"`), which
+is a far smaller problem than a broken model.
+
+### New — mic is opened two different ways, and AEC hides the phone's own TTS
+
+`openMic()` (used by `stream_listen`, `pre_listen`, `speaker_*`) attaches
+`AcousticEchoCanceler` + `NoiseSuppressor` and enables both. `cmdMicRecord`
+builds its own `AudioRecord` with the same `VOICE_RECOGNITION` source but
+**no AEC and no NS**. Same phrase played through the speaker during capture:
+
+```
+mic_record  (no AEC) : peak 11854 (36.2% FS) rms 1203.6  -> offline transcribes it perfectly
+stream_listen (AEC)  : ""                                 -> nothing
+```
+
+Both behaviours are correct in isolation — AEC doing its job is *desirable*
+(it is what stops the assistant transcribing itself, cf. checklist item 9) —
+but the inconsistency is a trap: **`mic_record` is not a faithful proxy for
+what the recognizer hears**, so it cannot be used to debug listen paths. It
+also means TTS-through-the-speaker can't serve as a test signal for
+`stream_listen`.
+
+Minor, same function: the `AcousticEchoCanceler` / `NoiseSuppressor` objects
+are created and enabled but never `release()`d, and the references go out of
+scope — one leaked `AudioEffect` pair per `openMic()` call.
+
+### New — `reconnect.erl` is inert on the phone
+
+`net_kernel:monitor_nodes(true, [{node_type, visible}])` (reconnect.erl:62)
+**never fires on a `-hidden` node**, because none of its connections are
+visible. Confirmed by a two-node local test (no `nodedown` in 6 s with
+`visible`; fires immediately with `{node_type, all}`), then confirmed in
+production: `reconnect:status()` reported
+`down => ['arbor_dev_4242@10.42.42.42']` over the very link the RPC
+traversed, with `total_reconnects => 0`.
+
+So the `{nodedown, ...}` clause is dead code and **after the bootstrap ping
+the daemon never reconnects anything** — a mobile drop is permanent until
+the app restarts. This is almost certainly what the `-hidden` change traded
+away: it fixed the mesh thrashing and silently disabled the reconnect that
+was compensating for drops.
+
+**Severity: this is a hard strand, not slow recovery.** The link can only
+ever be established *outbound from the phone* — verified 2026-07-20 while
+the phone was disconnected:
+
+```
+epmd on phone, from this box : {error,address}
+epmd on phone, from arbor    : {error,address}
+arbor -> phone net_adm:ping  : pang
+ICMP to phone                : 100% loss
+```
+
+Nothing on the cluster side can re-dial it (NAT/firewall — inbound is
+closed). So the phone is the only party that can restore the connection, and
+the daemon whose job that is never fires. **One dropped link = phone
+unreachable until the app is manually restarted.** It dropped twice during
+this session; the first time it recovered, the second time it stayed down.
+
+**Fix (validated 2026-07-20 on a hidden node, full cycle):**
+
+- reconnect.erl:62 — `{node_type, visible}` → `{node_type, all}`
+- reconnect.erl:103 — `Connected = nodes()` → `nodes(connected)`; today
+  `status/0` reports every target as down even while connected.
+
+Empirically, on a `-hidden` node against a normal peer:
+
+```
+{node_type, visible}  nodeup: NOTHING   nodedown: NOTHING
+{node_type, all}      nodeup: {nodeup,  N,[{node_type,hidden}]}
+                      nodedown: {nodedown,N,[{node_type,hidden}]}
+                      then nodeup again on reconnect
+```
+
+`all` is a superset of `visible`, so nothing else regresses, and the existing
+`{nodedown, Node, _Info}` / `{nodeup, Node, _Info}` clauses already match the
+3-tuple shape `monitor_nodes/2` delivers — it really is a one-word change
+plus the `status/0` fix.
+
+**Also worth adding: a periodic sweep.** `monitor_nodes` is edge-triggered,
+and with `net_ticktime 120` a silent mobile drop takes up to ~2 min to
+surface as `nodedown` — and a missed edge means the daemon waits forever.
+A level-triggered timer (every ~30-60 s, ping any target not in
+`nodes(connected)`) is a few lines and makes reconnection robust regardless
+of whether the event fires. Recommended given the link is demonstrably
+flaky: the phone dropped and recovered mid-session during this very run.
+
+Both need a rebuild + redeploy to land.
+
+### New — `speaker_verify` window is hardcoded and length-sensitive
+
+`cmdSpeakerVerify` ends with `speakerId.verify(name, wav, 4, threshold)` —
+**verify uses 4 s while enrollment uses 5 s**. `SpeakerId.verify()` takes a
+`seconds` parameter; the command layer pins it. The arg parser accepts a
+name, a `/`-prefixed WAV and a threshold, but has no way to pass a duration.
+
+That matters because the embedding is strongly length-sensitive.
+Deterministic (0.370 three runs in a row), on *identical* speech truncated
+to different lengths:
+
+```
+2.00s→0.318  2.50s→0.881  3.00s→0.871  3.50s→0.515
+4.00s→0.370  4.50s→0.900  5.00s→0.898
+```
+
+Essentially bimodal: ~0.87-0.90 or ~0.31-0.39. The hardcoded 4 s lands in
+the bad region.
+
+- Enrollment, centroid and cosine are all **correct** — SpeakerId.java:350-376
+  reviewed, and verifying a 5 s WAV scores **0.898, verified:true**.
+- **Do not "tune the threshold" to compensate** (the round-2/round-5 open
+  item). No threshold separates 0.31-0.90 for the same speaker; lowering it
+  to 0.28 would admit impostors. Fix the capture length first, then tune.
+- Silence dilutes too, asymmetrically: +2 s trailing → 0.816, +5 s trailing
+  → 0.292, but 2 s *prepended* → 0.880.
+- **Naive VAD concatenation makes it worse** — stitching only the voiced
+  100 ms windows dropped a 0.898 sample to 0.343. Tested and rejected; the
+  discontinuities hurt more than the silence. Any real fix needs proper
+  segment-boundary handling, not RMS gating.
+
+### New — remote ASR is misconfigured (blocks #6)
+
+`speech:remote_asr_node()` returns `arbor_gpu2@10.42.42.97`, which **does
+not exist** — the node at that IP is `arbor_dev_060c@10.42.42.97` (ping
+`pang` vs `pong`). Worse, **no ASR/whisper/speech app runs on any cluster
+node**, so there is nothing to chunk audio to. `asr_mode` is currently
+`remote`, which means `speech:listen/1` and `speech:stream_listen/1` route
+into a dead end.
+
+Note the asymmetry: `Voice.stream_listen` (arbor) invokes the *bridge*
+`stream_listen` command and is unaffected by `asr_mode`, while
+`speech:stream_listen/1` (on the phone) honours it. Same name, different
+routing depending on which side you call it from.
+
+### Smaller things this run turned up
+
+- **`Voice.speak/3` and `Voice.tts_stop/1` discard status** (`{:ok,_} -> :ok`,
+  voice.ex:130/147) — a caller cannot tell a completed utterance from a
+  cancelled one. The phone returns `{"status":"cancelled", ..., "gen_ms":_,
+  "first_audio_ms":_}`; `first_audio_ms` looks like the right t0 for the
+  VOICE-32 end-of-utterance→first-audio telemetry.
+- **`pre_listen` returns `ok` when it silently skipped.** With the mic held
+  it logs `Pre-record skipped: mic busy (stream_listen)` (SpeechEngine.java:903)
+  and still answers `ok`. Callers can't tell whether priming happened —
+  which now matters, because the clipping fix depends on it.
+- **9876 auth is coalescing-sensitive by design.** `gen_tcp:recv(S, 0, ...)`
+  on a raw socket (BeamService.java:468) returns whatever is buffered, so a
+  client that writes `auth <tok>\ncmd\n` in one go fails with `auth failed`.
+  All four in-tree clients wait for the reply, so this is correct — but
+  hand-driven `nc` needs a pause between the lines. `{packet, line}` would
+  make it robust.
+- **#5 can't be tested without a restart.** sherpa keeps the recognizer in
+  memory, so renaming `files/stt-model` mid-session changes nothing (tried:
+  empty transcript, then restored and verified intact). The
+  `isSttReady()` → `{"error":"stt engine not ready"}` path exists and is
+  correct by inspection; exercising it needs a restart with the model absent.
+- Streamed-TTS underrun risk is real but marginal on this device: for a
+  1.9 s utterance, `gen_ms` 2418 vs `first_audio_ms` 859 — generation ran
+  slower than realtime but the head start absorbed it. Fixed per-call
+  overhead (~1.3 s) dominates for short utterances.
+- Mic levels are healthy: silence peak 44 / rms 6.8, speech peak 18223
+  (55.6% FS) / rms 1422.6. Not an AGC or gain problem.
+
+### Still needs the earbuds
+
+Items 3 (buddie half) and 9 (echo suppression) — `buddie_status` reports
+`state:"disconnected"`, so `buddie_connect` first. Both are quick.
+
 ## Round 2 (2026-07-19, later same day) — what got done
 
 tts JSON args (review #9), mic arbiter (+ fixed a pre-record mic leak:
@@ -152,14 +465,16 @@ Round-3 open items:
 
 ## Noticed during round 2 (still open)
 
-- **SpeakerEmbeddingExtractor JNI symbols unverified.** The binding mirrors
-  upstream sherpa-onnx java-api and the bundled .so is the full JNI build
-  (diarization works), but the extractor symbols haven't been proven
-  on-device. `SpeakerId` catches Throwable and returns a structured error if
-  they're missing — first `speaker_enroll` on-device is the real test.
+- ~~**SpeakerEmbeddingExtractor JNI symbols unverified.**~~ **RESOLVED
+  2026-07-20 (round 7)** — symbols are present and working: extractor loads
+  in ~2.5 s, dim=512, enroll/list/forget round-trips clean on-device.
 - **Verification threshold is a constant (0.60).** Typical cosine thresholds
   for 3d-speaker/wespeaker models run 0.5–0.65; tune after enrolling real
   voices, then consider exposing it as an arg / config.
+  **Superseded 2026-07-20 (round 7): do not tune this yet.** The embedding
+  is length-sensitive and the verify window is hardcoded to 4 s (vs 5 s for
+  enrollment), which puts scores in a bimodal 0.31-0.90 range for the *same*
+  speaker. No threshold separates that. Fix the capture window first.
 - **Speaker names are sanitized to `[A-Za-z0-9_-]`** for filenames; verify
   results return the sanitized form.
 - **gemma_* errors still arrive ok:true.** Speech commands now fail at the
@@ -258,6 +573,23 @@ Round-3 open items:
   `stop_listen`/`tts_stop` passthrough for symmetry when VP-08 lands.
 
 ## How to verify this session's changes on-device
+
+> **Ran 2026-07-20 — see Round 7 at the top for results.** Corrections to the
+> steps below, learned the hard way:
+> - The phone is `-hidden`: it will **never** show in `nodes()` or
+>   `mix arbor.cluster`. Check `nodes(hidden)` / `nodes(connected)` on the
+>   gateway node instead.
+> - Step 4: `"cancelled"` is the status of the *interrupted `tts` call*, not
+>   of `tts_stop` (whose ack is `{"status":"stopping"}`). `Voice.tts_stop/1`
+>   discards it — use the raw command to see it.
+> - Step 5 cannot be tested without restarting the app; the recognizer is
+>   already in memory, so renaming the model dir mid-session does nothing.
+> - Step 6 is blocked until a remote ASR service actually exists (see Round 7).
+> - Step 7: verify uses a hardcoded 4 s window vs enrollment's 5 s, and 4 s
+>   sits in the unreliable regime — a low score is not necessarily a bad
+>   enrollment. Don't tune the threshold before fixing the window.
+> - `android:call/2` is `(Cmd, Args)`, **not** `(Cmd, Timeout)` — use
+>   `call/3` for a timeout. `call(<<"vibrate">>, 15000)` is a 15-second buzz.
 
 1. Rebuild APK (`./build.sh`), reinstall, restart BeamService.
 2. From a cluster node:
