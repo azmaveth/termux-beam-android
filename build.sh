@@ -121,22 +121,30 @@ else
         exit 1
     fi
 
-    # Recompile the Erlang bridge modules so erlang_src edits are packaged.
-    if command -v erlc >/dev/null; then
-        DEV_ERTS="$(cat "$PROJECT/assets/erlang/erts_version" 2>/dev/null || echo unknown)"
-        LOCAL_ERTS="$(erl -noshell -eval 'io:put_chars(erlang:system_info(version)), halt().' 2>/dev/null || echo unknown)"
-        if [[ "${DEV_ERTS%%.*}" != "${LOCAL_ERTS%%.*}" ]]; then
-            echo "WARNING: local ERTS $LOCAL_ERTS vs device ERTS $DEV_ERTS —"
-            echo "         .beam files compiled by a NEWER major may not load on the"
-            echo "         device. Match OTP majors (brew install erlang@NN)."
-        fi
-        EBIN="$PROJECT/assets/erlang/lib/android/ebin"
-        mkdir -p "$EBIN"
-        erlc -o "$EBIN" "$PROJECT/erlang_src/"*.erl
-    else
-        echo "WARNING: erlc not found — packaging previously compiled .beam files;"
-        echo "         erlang_src edits are NOT included in this APK."
+fi
+
+# Recompile the Erlang bridge modules so erlang_src edits are packaged.
+#
+# This runs in BOTH modes. It used to live inside the host-only branch above,
+# which meant a Termux (on-device) build silently shipped whatever .beam files
+# happened to already be in assets/ — erlang_src edits never reached the
+# device, with no error and no warning, and in termux mode stdout is
+# redirected to build.log so nothing was visible on the terminal either.
+if command -v erlc >/dev/null; then
+    DEV_ERTS="$(cat "$PROJECT/assets/erlang/erts_version" 2>/dev/null || echo unknown)"
+    LOCAL_ERTS="$(erl -noshell -eval 'io:put_chars(erlang:system_info(version)), halt().' 2>/dev/null || echo unknown)"
+    if [[ "${DEV_ERTS%%.*}" != "${LOCAL_ERTS%%.*}" ]]; then
+        echo "WARNING: local ERTS $LOCAL_ERTS vs device ERTS $DEV_ERTS —"
+        echo "         .beam files compiled by a NEWER major may not load on the"
+        echo "         device. Match OTP majors (brew install erlang@NN)."
     fi
+    EBIN="$PROJECT/assets/erlang/lib/android/ebin"
+    mkdir -p "$EBIN"
+    erlc -o "$EBIN" "$PROJECT/erlang_src/"*.erl
+    echo "Erlang bridge modules recompiled into $EBIN"
+else
+    echo "WARNING: erlc not found — packaging previously compiled .beam files;"
+    echo "         erlang_src edits are NOT included in this APK."
 fi
 
 BUILD="$PROJECT/build"
