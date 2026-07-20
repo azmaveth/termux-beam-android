@@ -62,11 +62,17 @@ public class GemmaEngine {
         load(modelPath, "cpu");
     }
 
-    /** "cpu" (optional thread count is left to the runtime), "gpu", or "gpu_artisan". */
+    /**
+     * "cpu" or "gpu". Thread counts are left to the runtime.
+     *
+     * litertlm 0.14.0 changed this API relative to 0.10.0: Backend.GpuArtisan
+     * was removed outright, and Backend.CPU's single-Integer constructor became
+     * CPU(Integer, Integer), so CPU(null) no longer resolves. Use the no-arg
+     * forms, which exist in both.
+     */
     private static Backend backendFor(String name) {
         if ("gpu".equalsIgnoreCase(name)) return new Backend.GPU();
-        if ("gpu_artisan".equalsIgnoreCase(name)) return new Backend.GpuArtisan();
-        return new Backend.CPU(null);
+        return new Backend.CPU();
     }
 
     /**
