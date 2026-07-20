@@ -14,6 +14,7 @@ import com.google.ai.edge.litertlm.SessionConfig;
 import java.io.File;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -102,12 +103,6 @@ public class GemmaEngine {
             Log.i(TAG, "Loading model: " + modelPath);
             long startMs = System.currentTimeMillis();
 
-            /* Text-only. Vision/audio backends must still be non-null — pass
-             * the same instance. maxNumTokens null = runtime default.
-             * Backend.CPU takes an Integer thread count (null = default);
-             * Backend.GPU has a no-arg constructor (verified against
-             * litertlm-android-0.10.0: Backend$GPU declares <init>()V and no
-             * INSTANCE field, so it is a plain class, not a Kotlin object). */
             /* Per-modality backends. The model declares constraints per
              * modality and they are not uniform — with all three on GPU the
              * engine rejects audio ("Model requires one of [cpu] but Audio
@@ -161,30 +156,42 @@ public class GemmaEngine {
     }
 
     /**
+     * Wrap a bare prompt in the loaded model's chat template.
+     *
+     * An instruct model emits an immediate end-of-turn for un-templated input,
+     * which is why raw prompts returned {"text":""} while still burning
+     * seconds of compute. LiteRT-LM does not apply the template itself, even
+     * though the bundle embeds one.
+     *
+     * Templates are per-family and share no syntax:
+     *   Gemma 4  — "<|turn>user\n" … "<turn|>\n<|turn>model\n"
+     *              (note: NOT Gemma 2/3's <start_of_turn>; the pipe flips
+     *               sides on the closing marker)
+     *   Granite  — "<|start_of_role|>user<|end_of_role|>" …
+     *              "<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+     *
+     * Selected from the loaded model's filename, defaulting to Gemma. A prompt
+     * that already carries role markers is passed through untouched, so a
+     * caller can build multi-turn context or use a family we don't know about.
+     */
+    private String applyChatTemplate(String prompt) {
+        if (prompt.contains("<|turn>") || prompt.contains("<|start_of_role|>")) {
+            return prompt;
+        }
+        String model = loadedModelPath == null
+            ? "" : loadedModelPath.toLowerCase(Locale.US);
+        if (model.contains("granite")) {
+            return "<|start_of_role|>user<|end_of_role|>" + prompt
+                 + "<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>";
+        }
+        return "<|turn>user\n" + prompt + "<turn|>\n<|turn>model\n";
+    }
+
+    /**
      * Generate a full response for the given prompt, blocking until complete.
      *
      * @throws IllegalStateException if no model is loaded
      */
-    /**
-     * Wrap a bare prompt in Gemma 4's chat template.
-     *
-     * The instruct model emits an immediate end-of-turn for un-templated
-     * input, which is why raw prompts returned {"text":""} while still
-     * burning 2-6 s of compute.
-     *
-     * Gemma 4's markers differ from Gemma 2/3 — there is no
-     * <start_of_turn>. Per chat_template.jinja in the litert-community repo,
-     * turns open with "<|turn>{role}\n" and close with "<turn|>\n" (the pipe
-     * flips sides), and generation is prompted with "<|turn>model\n".
-     *
-     * Passes through unchanged if the caller already supplied turn markers,
-     * so multi-turn conversations can be built up by the caller.
-     */
-    private static String applyChatTemplate(String prompt) {
-        if (prompt.contains("<|turn>")) return prompt;
-        return "<|turn>user\n" + prompt + "<turn|>\n<|turn>model\n";
-    }
-
     public String generate(String prompt) {
         synchronized (lock) {
             requireLoaded();
