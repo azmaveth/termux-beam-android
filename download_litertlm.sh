@@ -29,7 +29,7 @@ CENTRAL="https://repo1.maven.org/maven2"
 #   repo: google | central
 #   ext:  jar | aar
 PKGS=(
-    "google  com.google.ai.edge.litertlm   litertlm-android             0.10.0   aar"
+    "google  com.google.ai.edge.litertlm   litertlm-android             0.14.0   aar"
     "central com.google.code.gson           gson                         2.13.2   jar"
     "central org.jetbrains.kotlin           kotlin-reflect               2.2.21   jar"
     "central org.jetbrains.kotlin           kotlin-stdlib                2.2.21   jar"
