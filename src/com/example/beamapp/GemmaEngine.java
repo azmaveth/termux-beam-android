@@ -92,9 +92,11 @@ public class GemmaEngine {
             /* Text-only. Vision/audio backends must still be non-null — pass
              * the same instance. maxNumTokens null = runtime default.
              * Backend.CPU takes an Integer thread count (null = default);
-             * Backend.GPU is a Kotlin object, so it's referenced as INSTANCE. */
+             * Backend.GPU has a no-arg constructor (verified against
+             * litertlm-android-0.10.0: Backend$GPU declares <init>()V and no
+             * INSTANCE field, so it is a plain class, not a Kotlin object). */
             boolean useGpu = "gpu".equalsIgnoreCase(backendName);
-            Backend backend = useGpu ? Backend.GPU.INSTANCE : new Backend.CPU(null);
+            Backend backend = useGpu ? new Backend.GPU() : new Backend.CPU(null);
             Log.i(TAG, "Backend: " + (useGpu ? "GPU" : "CPU"));
             EngineConfig config = new EngineConfig(
                 modelPath,
