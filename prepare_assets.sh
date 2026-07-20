@@ -137,16 +137,14 @@ copy_otp_lib "$COMPILER_DIR"
 echo "$ERTS_VERSION" > "$ASSETS/erts_version"
 
 # === Compile Erlang bridge modules ===
+# Glob, not an explicit list: a hand-maintained list silently omits any new
+# module (the same trap the javac step had before it moved to `find`).
+# build.sh recompiles these on every build too — this pass exists so the asset
+# tree is complete and self-consistent straight out of prepare_assets.sh, and
+# so build.sh's "no erlc — packaging previously compiled .beam files" fallback
+# has something correct to fall back to.
 mkdir -p "$ASSETS/lib/android/ebin"
-erlc -o "$ASSETS/lib/android/ebin" "$PROJECT/erlang_src/android.erl"
-erlc -o "$ASSETS/lib/android/ebin" "$PROJECT/erlang_src/speech.erl"
-erlc -o "$ASSETS/lib/android/ebin" "$PROJECT/erlang_src/gemma.erl"
-erlc -o "$ASSETS/lib/android/ebin" "$PROJECT/erlang_src/eval.erl"
-erlc -o "$ASSETS/lib/android/ebin" "$PROJECT/erlang_src/cluster.erl"
-erlc -o "$ASSETS/lib/android/ebin" "$PROJECT/erlang_src/reconnect.erl"
-erlc -o "$ASSETS/lib/android/ebin" "$PROJECT/erlang_src/sensor_buffer.erl"
-erlc -o "$ASSETS/lib/android/ebin" "$PROJECT/erlang_src/asr_test.erl"
-erlc -o "$ASSETS/lib/android/ebin" "$PROJECT/erlang_src/remote_asr.erl"
+erlc -o "$ASSETS/lib/android/ebin" "$PROJECT/erlang_src/"*.erl
 
 echo "=== Assets prepared ==="
 du -sh "$LIBDIR"
