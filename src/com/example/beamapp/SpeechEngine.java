@@ -640,7 +640,16 @@ public class SpeechEngine {
         return "{\"status\":\"idle\"}";
     }
 
-    /** Transcribe a WAV file using streaming recognizer (batch mode). */
+    /**
+     * Transcribe a WAV file with the streaming recognizer.
+     *
+     * An online recognizer has to be driven like a stream: fed in small
+     * chunks, decoded as it goes, with endpoints accumulated. Handing it the
+     * whole file in one acceptWaveform() and decoding once only ever yielded
+     * roughly the last 1-1.5 s of audio, and clips shorter than that returned
+     * nothing at all ("Baltimore" -> "", the pangram -> "S over the Lazy do").
+     * This mirrors streamListen's read loop, which drives the model correctly.
+     */
     public String transcribeFile(String wavPath) {
         if (recognizer == null) return "{\"error\":\"STT not initialized\"}";
 
@@ -652,20 +661,43 @@ public class SpeechEngine {
             }
 
             OnlineStream stream = recognizer.createStream();
-            stream.acceptWaveform(samples, SAMPLE_RATE);
-            stream.inputFinished();
+            StringBuilder allText = new StringBuilder();
+            try {
+                int chunk = SAMPLE_RATE / 10;   // 100 ms, same as streamListen
+                for (int off = 0; off < samples.length; off += chunk) {
+                    int end = Math.min(off + chunk, samples.length);
+                    stream.acceptWaveform(Arrays.copyOfRange(samples, off, end), SAMPLE_RATE);
+                    while (recognizer.isReady(stream)) {
+                        recognizer.decode(stream);
+                    }
+                    /* Finalize at each endpoint — reset() otherwise discards
+                     * everything decoded since the previous one. */
+                    if (recognizer.isEndpoint(stream)) {
+                        String seg = recognizer.getResult(stream).getText().trim();
+                        if (!seg.isEmpty()) {
+                            if (allText.length() > 0) allText.append(" ");
+                            allText.append(seg);
+                        }
+                        recognizer.reset(stream);
+                    }
+                }
 
-            while (recognizer.isReady(stream)) {
-                recognizer.decode(stream);
+                stream.inputFinished();
+                while (recognizer.isReady(stream)) {
+                    recognizer.decode(stream);
+                }
+                String tail = recognizer.getResult(stream).getText().trim();
+                if (!tail.isEmpty()) {
+                    if (allText.length() > 0) allText.append(" ");
+                    allText.append(tail);
+                }
+            } finally {
+                stream.release();
             }
 
-            OnlineRecognizerResult result = recognizer.getResult(stream);
-            stream.release();
-
             long elapsed = System.currentTimeMillis() - t0;
-            String text = result.getText().trim();
             // Apply punctuation post-processing
-            String punctuated = addPunctuation(text);
+            String punctuated = addPunctuation(allText.toString().trim());
 
             return "{\"text\":\"" + escJson(punctuated)
                 + "\",\"duration\":" + String.format("%.1f", (float) samples.length / SAMPLE_RATE)
