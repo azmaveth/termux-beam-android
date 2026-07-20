@@ -229,11 +229,26 @@ switch (`if [[ "$MODE" == termux ]] … else … <erlc here> … fi`). An on-dev
 Termux build therefore packaged whatever `.beam` files were already sitting in
 `assets/`, and never compiled `erlang_src/*.erl` at all.
 
-This is worse than it sounds because **`assets/` is gitignored**. Compiled
-beams are not version-controlled, so the build-time erlc step is the *only*
-path by which an `erlang_src` edit can reach the device. On a phone-side build
-that path did not exist — meaning no edit to `android.erl`, `speech.erl`,
-`reconnect.erl` etc. has ever reached the device via a Termux build.
+On a phone-side build that path did not exist — meaning no edit to
+`android.erl`, `speech.erl`, `reconnect.erl` etc. reached the device via a
+Termux build unless `prepare_assets.sh` was re-run.
+
+**Correction (2026-07-20):** an earlier version of this note claimed `assets/`
+is gitignored and therefore the erlc step was the *only* route to the device.
+That is wrong in an important way. `.gitignore` does list `assets/`, but
+**973 files under it are tracked anyway** — gitignore has no effect on files
+already committed. That includes `assets/erlang/erts_version` and every
+`assets/erlang/lib/android/ebin/*.beam`. Consequences worth knowing:
+
+- The committed beams are stale, and any `git checkout -- assets/` or fresh
+  clone silently reverts the compiled modules to whatever was last committed.
+- `erts_version` is *generated* by `prepare_assets.sh` but also tracked with a
+  stale value (16.3.1, i.e. OTP 28) while the real Termux runtime is 17.0.3
+  (OTP 29). Restoring it from git resurrects the wrong version, which then
+  feeds both build.sh's ERTS-major warning and MainActivity's runtime label.
+- Generated artifacts should be untracked (`git rm --cached -r assets/`) so
+  the ignore rule actually takes effect. Left as-is for now because it is a
+  973-file change and unrelated to the work in flight.
 
 Failure mode was completely silent: no error, no warning, and termux mode
 redirects stdout to `build.log`, so nothing appeared on the terminal either.
