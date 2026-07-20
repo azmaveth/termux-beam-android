@@ -220,11 +220,30 @@ Note the ERTS-major check only ever *warned* — the `fi` closes before `erlc`
 runs — so a version mismatch never gated compilation and was never the reason
 edits went missing.
 
-**Open question flagged during this:** `assets/erlang/erts_version` reads
-`16.3.1` (ERTS 16 = OTP 28) and the app UI reports Erlang 28, but
-`erlang:system_info(otp_release)` on the running phone node returned `"29"`.
-Worth reconciling — if the runtime was upgraded without `erts_version` being
-regenerated, build.sh's mismatch check is comparing against a stale value.
+**`prepare_assets.sh` is the other compile path** (lines 140-149: one `erlc`
+per module into `assets/lib/android/ebin`, plus `erts_version` at line 137).
+That is how the device beams got built originally. But it is the heavy script
+— it rebuilds the runtime and ~300 MB of models — so nobody re-runs it for a
+one-line Erlang edit. Before this fix, editing `erlang_src` and running only
+`./build.sh` on the phone silently shipped stale beams.
+
+**Version confusion resolved — there was never a mismatch.** Everything on the
+device agrees:
+
+```
+system_version : Erlang/OTP 29 [erts-17.0.3]
+erts_version   : 17.0.3
+on-device reconnect.beam compile_info: version "10.0.2" (OTP 29 compiler),
+    source /data/data/com.termux/files/home/BeamApp/erlang_src/reconnect.erl
+```
+
+Termux's `erlc` and the device runtime are both OTP 29. Two red herrings fed
+the confusion: a *stale local* `assets/erlang/erts_version` (16.3.1, an old
+sync artifact — `assets/` is gitignored so it is never updated by pull), and
+`MainActivity.loadRuntimeLabel()` which **hardcoded the string "OTP 28"** and
+appended the real ERTS version to it, so an OTP 29 runtime displayed as
+"OTP 28 / ERTS 17.0.3". Fixed to derive OTP from the ERTS major (ERTS 14=26,
+15=27, 16=28, 17=29 — OTP = major + 12).
 
 ### New — mic is opened two different ways, and AEC hides the phone's own TTS
 

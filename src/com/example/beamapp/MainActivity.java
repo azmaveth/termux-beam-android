@@ -291,15 +291,28 @@ public class MainActivity extends Activity {
     }
 
     private String loadRuntimeLabel() {
-        /* Read bundled erts_version asset written by prepare_assets.sh */
+        /* Read bundled erts_version asset written by prepare_assets.sh.
+         *
+         * Derive the OTP release from the ERTS major rather than hardcoding
+         * it: ERTS 14 = OTP 26, 15 = 27, 16 = 28, 17 = 29, i.e. OTP is the
+         * ERTS major + 12. This label previously read "OTP 28" unconditionally
+         * and so reported an OTP 29 / ERTS 17.0.3 runtime as OTP 28, which is
+         * exactly the sort of thing that sends someone hunting a toolchain
+         * version mismatch that doesn't exist. */
         try (BufferedReader br = new BufferedReader(
                 new InputStreamReader(getAssets().open("erlang/erts_version")))) {
             String v = br.readLine();
             if (v != null && !v.trim().isEmpty()) {
-                return "OTP 28 / ERTS " + v.trim();
+                String erts = v.trim();
+                try {
+                    int major = Integer.parseInt(erts.split("\\.")[0]);
+                    return "OTP " + (major + 12) + " / ERTS " + erts;
+                } catch (NumberFormatException ignored) {
+                    return "ERTS " + erts;
+                }
             }
         } catch (Exception e) { /* fall through to default */ }
-        return "OTP 28";
+        return "runtime version unknown";
     }
 
     private void updateStatus(boolean running) {
