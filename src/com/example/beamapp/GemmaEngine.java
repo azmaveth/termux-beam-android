@@ -125,17 +125,18 @@ public class GemmaEngine {
             /* litertlm 0.14.0 inserted maxNumImages before cacheDir:
              *   (modelPath, backend, visionBackend, audioBackend,
              *    maxNumTokens, maxNumImages, cacheDir)
-             * We pass 0 because this is a text-only path — and because the
-             * vision encoder is precisely what refused to initialise on 0.10.0
-             * ("must have exactly one signature but got 3"), so declaring zero
-             * images is the documented way to keep it out of the graph. */
+             * Must be null or positive — 0 is rejected outright:
+             *   "maxNumImages must be positive or null (use the default from
+             *    model or engine)."
+             * So there is no way to switch the vision encoder off from here;
+             * null takes the model/engine default. */
             EngineConfig config = new EngineConfig(
                 modelPath,
                 backendFor(textName),
                 backendFor(visionName),
                 backendFor(audioName),
                 null,                   // maxNumTokens — library default
-                Integer.valueOf(0),     // maxNumImages — text-only
+                null,                   // maxNumImages — model/engine default
                 cacheDir.getAbsolutePath()
             );
 
