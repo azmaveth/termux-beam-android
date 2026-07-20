@@ -51,6 +51,8 @@ import android.widget.Toast;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
+import android.media.audiofx.AcousticEchoCanceler;
+import android.media.audiofx.NoiseSuppressor;
 import java.io.BufferedReader;
 import java.io.DataOutputStream;
 import java.io.File;
@@ -60,11 +62,15 @@ import java.io.OutputStream;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.io.RandomAccessFile;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -83,6 +89,17 @@ import android.util.Base64;
 public class BridgeServer {
     private static final String TAG = "BridgeServer";
     public static final int PORT = 9877;
+    private static final String LOOPBACK_HOST = "127.0.0.1";
+
+    /*
+     * Shared-secret auth: a random token written app-private at startup.
+     * Same-uid clients (the BEAM runtime, the UI) read files/bridge_token;
+     * other local apps cannot, so they can't reach shell/sms/contacts via
+     * the loopback port. Escape hatch for debugging: create
+     * files/bridge_auth_disabled and restart to accept unauthenticated
+     * connections.
+     */
+    private String authToken;
 
     private final Context context;
     private ServerSocket serverSocket;
@@ -112,6 +129,9 @@ public class BridgeServer {
     /* Buddie earbuds BLE service */
     private BuddieService buddieService;
 
+    /* Speaker enrollment/verification (VOICE-21) */
+    private SpeakerId speakerId;
+
     /* Phone API (camera, media, files, etc.) */
     private PhoneAPI phoneAPI;
 
@@ -134,8 +154,40 @@ public class BridgeServer {
             }
         }, "speech-init").start();
         buddieService = new BuddieService(context, btAdapter, speechEngine);
+        speakerId = new SpeakerId(context, speechEngine);
         phoneAPI = new PhoneAPI(context);
         gemmaEngine = new GemmaEngine(context);
+        initAuthToken();
+    }
+
+    private void initAuthToken() {
+        try {
+            File disabled = new File(context.getFilesDir(), "bridge_auth_disabled");
+            if (disabled.exists()) {
+                Log.w(TAG, "Bridge auth DISABLED via bridge_auth_disabled flag");
+                authToken = null;
+                return;
+            }
+            File f = new File(context.getFilesDir(), "bridge_token");
+            if (f.exists() && f.length() >= 16) {
+                byte[] raw = new byte[(int) f.length()];
+                FileInputStream in = new FileInputStream(f);
+                int n = in.read(raw);
+                in.close();
+                authToken = new String(raw, 0, Math.max(0, n), "UTF-8").trim();
+            } else {
+                byte[] rnd = new byte[24];
+                new java.security.SecureRandom().nextBytes(rnd);
+                authToken = Base64.encodeToString(rnd, Base64.NO_WRAP | Base64.URL_SAFE);
+                FileOutputStream fos = new FileOutputStream(f);
+                fos.write(authToken.getBytes("UTF-8"));
+                fos.close();
+                Log.i(TAG, "Bridge auth token generated");
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Auth token init failed — bridge accepts unauthenticated connections", e);
+            authToken = null;
+        }
     }
 
     public void start() {
@@ -145,8 +197,9 @@ public class BridgeServer {
             @Override
             public void run() {
                 try {
-                    serverSocket = new ServerSocket(PORT);
-                    Log.i(TAG, "Bridge server listening on port " + PORT);
+                    serverSocket = new ServerSocket(
+                        PORT, 50, InetAddress.getByName(LOOPBACK_HOST));
+                    Log.i(TAG, "Bridge server listening on " + LOOPBACK_HOST + ":" + PORT);
                     while (running) {
                         Socket client = serverSocket.accept();
                         Log.i(TAG, "Bridge client connected");
@@ -196,6 +249,10 @@ public class BridgeServer {
         if (buddieService != null) {
             buddieService.release();
         }
+        /* Clean up speaker id */
+        if (speakerId != null) {
+            speakerId.release();
+        }
         /* Clean up phone API */
         if (phoneAPI != null) {
             phoneAPI.release();
@@ -216,10 +273,37 @@ public class BridgeServer {
                     PrintWriter out = new PrintWriter(client.getOutputStream(), true);
 
                     String line;
+                    boolean authed = (authToken == null);
                     while ((line = in.readLine()) != null) {
+                        if (!authed) {
+                            /* First line must be {"cmd":"auth","args":"<token>"} */
+                            String cmd = jsonGet(line, "cmd");
+                            String tok = unquote(jsonGet(line, "args")).trim();
+                            String reqId = jsonGet(line, "id");
+                            if (reqId.isEmpty()) reqId = "0";
+                            if ("auth".equals(cmd) && authToken.equals(tok)) {
+                                authed = true;
+                                synchronized (out) {
+                                    out.println("{\"id\":" + reqId
+                                        + ",\"ok\":true,\"data\":\"authenticated\"}");
+                                    out.flush();
+                                }
+                                continue;
+                            }
+                            Log.w(TAG, "Bridge client failed auth — closing");
+                            synchronized (out) {
+                                out.println("{\"id\":" + reqId
+                                    + ",\"ok\":false,\"error\":\"auth required\"}");
+                                out.flush();
+                            }
+                            break;
+                        }
                         String response = dispatch(line.trim(), out);
                         if (response != null) {
-                            out.println(response);
+                            synchronized (out) {
+                                out.println(response);
+                                out.flush();
+                            }
                         }
                     }
                     client.close();
@@ -233,14 +317,69 @@ public class BridgeServer {
 
     /* ---- Command dispatch ---- */
 
+    /*
+     * Long-running commands run on a dedicated worker thread so the bridge
+     * connection stays responsive: stop_listen, toast, tts_stop, etc. can
+     * get through while a listen/TTS/inference call is in flight. Replies
+     * are written asynchronously; clients match them by id.
+     */
+    private static final Set<String> ASYNC_COMMANDS = new HashSet<>(Arrays.asList(
+        "listen", "stream_listen", "remote_listen", "buddie_listen",
+        "stt", "transcribe_offline", "diarize",
+        "tts", "tts_file",
+        "speaker_enroll", "speaker_verify",
+        "gemma_generate", "gemma_stream"));
+
+    /*
+     * Speech/inference commands report failures as {"error":...}. For these,
+     * surface the failure as a protocol-level error ({"ok":false}) so BEAM
+     * callers get {error, Reason} instead of an error blob disguised as a
+     * successful result (VOICE-28: fail loudly, never silently).
+     */
+    private static final Set<String> SPEECH_COMMANDS = new HashSet<>(Arrays.asList(
+        "listen", "stream_listen", "remote_listen", "buddie_listen",
+        "stt", "transcribe_offline", "diarize", "mic_record", "mic_stop",
+        "tts", "tts_file", "tts_stop", "stop_listen", "pre_listen",
+        "buddie_connect", "buddie_disconnect", "buddie_mix",
+        "speaker_enroll", "speaker_verify", "speaker_list", "speaker_forget",
+        "gemma_load", "gemma_generate", "gemma_stream", "gemma_unload",
+        "gemma_status"));
+
     private String dispatch(String request, PrintWriter out) {
         String id = "0";
         try {
             /* Minimal JSON parsing — avoid external deps */
             id = jsonGet(request, "id");
-            String cmd = jsonGet(request, "cmd");
-            String args = jsonGet(request, "args");
+            final String cmd = jsonGet(request, "cmd");
+            final String args = jsonGet(request, "args");
+            final String req = request;
+            final PrintWriter writer = out;
 
+            if (ASYNC_COMMANDS.contains(cmd)) {
+                final String asyncId = id;
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        String response = runCommand(cmd, args, asyncId, writer, req);
+                        if (response != null) {
+                            synchronized (writer) {
+                                writer.println(response);
+                                writer.flush();
+                            }
+                        }
+                    }
+                }, "bridge-" + cmd).start();
+                return null;
+            }
+            return runCommand(cmd, args, id, out, request);
+        } catch (Exception e) {
+            Log.e(TAG, "Dispatch error: " + request, e);
+            return "{\"id\":" + id + ",\"ok\":false,\"error\":\"" + escJson(e.getMessage()) + "\"}";
+        }
+    }
+
+    private String runCommand(String cmd, String args, String id, PrintWriter out, String request) {
+        try {
             String result;
             switch (cmd) {
                 case "device_info":    result = cmdDeviceInfo(); break;
@@ -271,6 +410,8 @@ public class BridgeServer {
                 case "pre_listen":     speechEngine.startPreRecord(); result = "\"ok\""; break;
                 case "stream_listen":  result = cmdStreamListen(args, id, out); break;
                 case "remote_listen":  result = cmdRemoteListen(args, id, out); break;
+                case "stop_listen":    result = cmdStopListen(); break;
+                case "tts_stop":       result = cmdTtsStop(); break;
                 case "speech_status":  result = speechEngine.getStatus(); break;
                 case "transcribe_offline": result = cmdTranscribeOffline(args); break;
                 case "diarize":        result = cmdDiarize(args); break;
@@ -297,6 +438,11 @@ public class BridgeServer {
                 case "buddie_disconnect": result = cmdBuddieDisconnect(); break;
                 case "buddie_listen":     result = cmdBuddieListen(args, id, out); break;
                 case "buddie_status":     result = cmdBuddieStatus(); break;
+                case "buddie_mix":        result = cmdBuddieMix(args); break;
+                case "speaker_enroll":    result = cmdSpeakerEnroll(args); break;
+                case "speaker_verify":    result = cmdSpeakerVerify(args); break;
+                case "speaker_list":      result = speakerId.list(); break;
+                case "speaker_forget":    result = speakerId.forget(unquote(args).trim()); break;
                 case "logcat":         result = cmdLogcat(args); break;
                 case "dumpsys":        result = cmdDumpsys(args); break;
                 case "pm_path":        result = cmdPmPath(args); break;
@@ -360,14 +506,36 @@ public class BridgeServer {
                 case "cluster_sdr_aircraft": result = cmdCluster("cluster:sdr_aircraft(" + parseInt(args, 50) + ")."); break;
                 case "cluster_sdr_count":   result = cmdCluster("cluster:sdr_count()."); break;
                 case "ping":           result = "\"pong\""; break;
+                /* Idempotent no-op when a client sends auth after the gate
+                 * already passed (e.g. auth disabled server-side). */
+                case "auth":           result = "\"authenticated\""; break;
                 default:
                     return "{\"id\":" + id + ",\"ok\":false,\"error\":\"unknown command: " + cmd + "\"}";
+            }
+            if (result == null) {
+                /* Streaming command wrote its own final response. */
+                return null;
+            }
+            if (SPEECH_COMMANDS.contains(cmd)) {
+                return finalResponse(id, result);
             }
             return "{\"id\":" + id + ",\"ok\":true,\"data\":" + result + "}";
         } catch (Exception e) {
             Log.e(TAG, "Dispatch error: " + request, e);
             return "{\"id\":" + id + ",\"ok\":false,\"error\":\"" + escJson(e.getMessage()) + "\"}";
         }
+    }
+
+    /**
+     * Wrap a command result as a final protocol response, converting
+     * {"error":...} results into protocol-level errors.
+     */
+    private static String finalResponse(String id, String result) {
+        if (result.startsWith("{\"error\":")) {
+            String msg = jsonGet(result, "error");
+            return "{\"id\":" + id + ",\"ok\":false,\"error\":\"" + escJson(msg) + "\"}";
+        }
+        return "{\"id\":" + id + ",\"ok\":true,\"data\":" + result + "}";
     }
 
     /* ---- Screen/Accessibility commands ---- */
@@ -392,11 +560,24 @@ public class BridgeServer {
 
     /* ---- BEAM VM commands (port 9876) ---- */
 
+    /**
+     * Authenticate a 9876 command-port connection (same app-private token
+     * as the bridge). Consumes the reply so the caller's next read is the
+     * actual command response.
+     */
+    private void authBeamPort(OutputStream os, BufferedReader br) throws Exception {
+        if (authToken == null) return;
+        os.write(("auth " + authToken + "\n").getBytes());
+        os.flush();
+        br.read(new char[64]);
+    }
+
     private String cmdBeam(String command) {
         try (Socket sock = new Socket("127.0.0.1", 9876)) {
             sock.setSoTimeout(30000);
             OutputStream os = sock.getOutputStream();
             BufferedReader br = new BufferedReader(new InputStreamReader(sock.getInputStream()));
+            authBeamPort(os, br);
             os.write(command.getBytes());
             os.flush();
             // Read response (terminated by newline)
@@ -428,6 +609,7 @@ public class BridgeServer {
             sock.setSoTimeout(60000);
             OutputStream os = sock.getOutputStream();
             BufferedReader br = new BufferedReader(new InputStreamReader(sock.getInputStream()));
+            authBeamPort(os, br);
             os.write(("eval " + erlExpr).getBytes());
             os.flush();
             char[] buf = new char[1048576]; // 1 MB buffer for large results
@@ -906,7 +1088,11 @@ public class BridgeServer {
      */
     @SuppressWarnings("MissingPermission")
     private String cmdMicRecord(String args) {
-        if (recording.get()) return "\"already recording\"";
+        if (recording.get()) return "{\"error\":\"already recording\"}";
+        // Participate in the shared mic arbiter so concurrent captures fail
+        // with a descriptive error instead of a cryptic init failure.
+        String busy = speechEngine.claimMic("mic_record");
+        if (busy != null) return "{\"error\":\"mic busy (" + busy + ")\"}";
         // "stream" means record indefinitely until mic_stop
         int durationSec = "stream".equalsIgnoreCase(unquote(args))
             ? 3600  // 1 hour max
@@ -919,20 +1105,38 @@ public class BridgeServer {
 
         try {
             audioRecord = new AudioRecord(
-                MediaRecorder.AudioSource.MIC,
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
                 SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
                 bufSize
             );
         } catch (Exception e) {
-            return "\"mic init failed: " + escJson(e.getMessage()) + "\"";
+            speechEngine.releaseMic("mic_record");
+            return "{\"error\":\"mic init failed: " + escJson(e.getMessage()) + "\"}";
         }
 
         if (audioRecord.getState() != AudioRecord.STATE_INITIALIZED) {
             audioRecord.release();
             audioRecord = null;
-            return "\"mic not available\"";
+            speechEngine.releaseMic("mic_record");
+            return "{\"error\":\"mic not available\"}";
+        }
+
+        /* ASR-oriented capture: echo cancellation + noise suppression when
+         * the hardware supports them (recordings feed local/remote STT). */
+        try {
+            int session = audioRecord.getAudioSessionId();
+            if (AcousticEchoCanceler.isAvailable()) {
+                AcousticEchoCanceler aec = AcousticEchoCanceler.create(session);
+                if (aec != null) aec.setEnabled(true);
+            }
+            if (NoiseSuppressor.isAvailable()) {
+                NoiseSuppressor ns = NoiseSuppressor.create(session);
+                if (ns != null) ns.setEnabled(true);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "AEC/NS setup failed (continuing without)", e);
         }
 
         new File(recordingDir).mkdirs();
@@ -980,6 +1184,7 @@ public class BridgeServer {
                         audioRecord.release();
                         audioRecord = null;
                     }
+                    speechEngine.releaseMic("mic_record");
                 }
             }
         }, "mic-record").start();
@@ -988,7 +1193,7 @@ public class BridgeServer {
     }
 
     private String cmdMicStop() {
-        if (!recording.get()) return "\"not recording\"";
+        if (!recording.get()) return "{\"error\":\"not recording\"}";
         recording.set(false);
         /* Wait a moment for the recording thread to finish */
         try { Thread.sleep(200); } catch (InterruptedException e) { /* */ }
@@ -1025,24 +1230,43 @@ public class BridgeServer {
      */
     private String cmdTts(String args) {
         String text = unquote(args);
-        if (text.isEmpty()) return "\"usage: tts <text> or tts <sid> <speed> <text>\"";
+        if (text.isEmpty()) return "{\"error\":\"usage: tts <text> or tts <sid> <speed> <text>\"}";
         if (!speechEngine.isTtsReady()) {
             /* Wait briefly for engine init */
             for (int i = 0; i < 50 && !speechEngine.isTtsReady(); i++) {
                 try { Thread.sleep(100); } catch (InterruptedException e) { break; }
             }
-            if (!speechEngine.isTtsReady()) return "\"tts engine not ready\"";
+            if (!speechEngine.isTtsReady()) return "{\"error\":\"tts engine not ready\"}";
         }
-        // Check for "sid speed text" format (e.g. "2 1.2 Hello world")
         int sid = 0;
         float speed = 1.0f;
-        java.util.regex.Matcher m = java.util.regex.Pattern
-            .compile("^(\\d+)\\s+(\\d+\\.?\\d*)\\s+(.+)$", java.util.regex.Pattern.DOTALL)
-            .matcher(text);
-        if (m.matches()) {
-            sid = Integer.parseInt(m.group(1));
-            speed = Float.parseFloat(m.group(2));
-            text = m.group(3);
+        if (text.startsWith("{")) {
+            // Preferred: JSON args {"text":...,"sid":0,"speed":1.0} — no
+            // ambiguity when the text itself starts with numbers.
+            String jsonText = jsonGet(text, "text");
+            if (jsonText.isEmpty()) {
+                return "{\"error\":\"usage: tts {\\\"text\\\":\\\"...\\\",\\\"sid\\\":0,\\\"speed\\\":1.0}\"}";
+            }
+            String sidStr = jsonGet(text, "sid");
+            String speedStr = jsonGet(text, "speed");
+            if (!sidStr.isEmpty()) {
+                try { sid = Integer.parseInt(sidStr); } catch (Exception ignored) { }
+            }
+            if (!speedStr.isEmpty()) {
+                try { speed = Float.parseFloat(speedStr); } catch (Exception ignored) { }
+            }
+            text = jsonText;
+        } else {
+            // Legacy: "sid speed text" positional prefix. Ambiguous when the
+            // text itself starts with two numbers — prefer the JSON form.
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("^(\\d+)\\s+(\\d+\\.?\\d*)\\s+(.+)$", java.util.regex.Pattern.DOTALL)
+                .matcher(text);
+            if (m.matches()) {
+                sid = Integer.parseInt(m.group(1));
+                speed = Float.parseFloat(m.group(2));
+                text = m.group(3);
+            }
         }
         return speechEngine.speak(text, sid, speed);
     }
@@ -1076,10 +1300,10 @@ public class BridgeServer {
         if (wavPath.isEmpty() && lastRecordingPath != null) {
             wavPath = lastRecordingPath;
         }
-        if (wavPath.isEmpty()) return "\"no audio file specified\"";
+        if (wavPath.isEmpty()) return "{\"error\":\"no audio file specified\"}";
         File wavFile = new File(wavPath);
-        if (!wavFile.exists()) return "\"file not found: " + escJson(wavPath) + "\"";
-        if (!speechEngine.isSttReady()) return "\"stt engine not ready\"";
+        if (!wavFile.exists()) return "{\"error\":\"file not found: " + escJson(wavPath) + "\"}";
+        if (!speechEngine.isSttReady()) return "{\"error\":\"stt engine not ready\"}";
         return speechEngine.transcribeFile(wavPath);
     }
 
@@ -1092,7 +1316,7 @@ public class BridgeServer {
 
         /* Record */
         String recResult = cmdMicRecord(String.valueOf(durationSec));
-        if (!recResult.contains("\"recording\"")) return recResult;
+        if (!recResult.contains("\"status\":\"recording\"")) return recResult;
 
         /* Wait for recording to finish */
         long waitMs = (durationSec + 1) * 1000L;
@@ -1109,11 +1333,13 @@ public class BridgeServer {
     /**
      * Streaming listen: record from mic with real-time STT and VAD.
      * Sends partial results as JSON lines, returns final result.
-     * Args: max duration in seconds (default 10).
+     * Args: max duration in seconds (default 10), optionally followed by
+     * "once" to return at the first utterance endpoint ("8 once").
      */
     private String cmdStreamListen(String args, final String msgId, final PrintWriter writer) {
-        int maxDuration = parseInt(args, 10);
-        if (!speechEngine.isSttReady()) return "\"stt engine not ready\"";
+        int maxDuration = parseListenSeconds(args, 10);
+        boolean once = parseListenOnce(args);
+        if (!speechEngine.isSttReady()) return "{\"error\":\"stt engine not ready\"}";
 
         SpeechEngine.PartialCallback callback = null;
         if (writer != null) {
@@ -1131,10 +1357,10 @@ public class BridgeServer {
             };
         }
 
-        String result = speechEngine.streamListen(maxDuration, callback);
+        String result = speechEngine.streamListen(maxDuration, once, callback);
         /* Return null — we send final response directly for streaming commands */
         if (writer != null) {
-            String finalResponse = "{\"id\":" + msgId + ",\"ok\":true,\"data\":" + result + "}";
+            String finalResponse = finalResponse(msgId, result);
             synchronized (writer) {
                 writer.println(finalResponse);
                 writer.flush();
@@ -1142,6 +1368,83 @@ public class BridgeServer {
             return null;
         }
         return result;
+    }
+
+    /** Stop any in-progress STT listen (stream, buddie, or remote chunked). */
+    private String cmdStopListen() {
+        speechEngine.stopListening();
+        if (buddieService != null) buddieService.stopListening();
+        return "{\"status\":\"stopped\"}";
+    }
+
+    /** Cancel in-progress TTS playback. */
+    private String cmdTtsStop() {
+        return speechEngine.stopSpeaking();
+    }
+
+    /* ---- Speaker identification (VOICE-21 enabler) ---- */
+
+    /**
+     * Enroll a speaker for verification.
+     * Args: "<name>" (records 5s from mic) or "<name> <wav_path>".
+     */
+    private String cmdSpeakerEnroll(String args) {
+        String raw = unquote(args).trim();
+        if (raw.isEmpty()) return "{\"error\":\"usage: speaker_enroll <name> [wav_path]\"}";
+        String name = raw;
+        String wav = null;
+        int space = raw.indexOf(' ');
+        if (space > 0) {
+            name = raw.substring(0, space).trim();
+            wav = raw.substring(space + 1).trim();
+            if (wav.isEmpty()) wav = null;
+        }
+        return speakerId.enroll(name, wav, 5);
+    }
+
+    /**
+     * Verify the current speaker.
+     * Args: any of "<name>", "<wav_path>", "<threshold>" in any order
+     * (e.g. "" records 4s and matches all enrolled; "hysun 0.7" verifies
+     * against hysun at threshold 0.7). Paths are recognized by a leading
+     * '/', thresholds by parsing as a float in (0, 1].
+     */
+    private String cmdSpeakerVerify(String args) {
+        String raw = unquote(args).trim();
+        String name = null;
+        String wav = null;
+        float threshold = SpeakerId.DEFAULT_THRESHOLD;
+        if (!raw.isEmpty()) {
+            for (String tok : raw.split("\\s+")) {
+                if (tok.startsWith("/")) {
+                    wav = tok;
+                    continue;
+                }
+                try {
+                    float t = Float.parseFloat(tok);
+                    if (t > 0.0f && t <= 1.0f) {
+                        threshold = t;
+                        continue;
+                    }
+                } catch (Exception ignored) { }
+                name = tok;
+            }
+        }
+        return speakerId.verify(name, wav, 4, threshold);
+    }
+
+    /** Parse listen args of the form "<seconds>" or "<seconds> once". */
+    private static int parseListenSeconds(String args, int def) {
+        String raw = unquote(args).trim();
+        if (raw.isEmpty()) return def;
+        String first = raw.split("\\s+")[0];
+        try { return Integer.parseInt(first); } catch (Exception e) { return def; }
+    }
+
+    /** True if listen args request endpoint-return mode ("8 once" / "once"). */
+    private static boolean parseListenOnce(String args) {
+        String raw = unquote(args).trim().toLowerCase(Locale.US);
+        return raw.equals("once") || raw.endsWith(" once");
     }
 
     /**
@@ -1180,7 +1483,7 @@ public class BridgeServer {
 
         String result = speechEngine.remoteStreamListen(maxDuration, callback);
         if (writer != null) {
-            String finalResponse = "{\"id\":" + msgId + ",\"ok\":true,\"data\":" + result + "}";
+            String finalResponse = finalResponse(msgId, result);
             synchronized (writer) {
                 writer.println(finalResponse);
                 writer.flush();
@@ -1198,10 +1501,10 @@ public class BridgeServer {
         if (wavPath.isEmpty() && lastRecordingPath != null) {
             wavPath = lastRecordingPath;
         }
-        if (wavPath.isEmpty()) return "\"no audio file specified\"";
+        if (wavPath.isEmpty()) return "{\"error\":\"no audio file specified\"}";
         File wavFile = new File(wavPath);
-        if (!wavFile.exists()) return "\"file not found: " + escJson(wavPath) + "\"";
-        if (!speechEngine.isOfflineSttReady()) return "\"offline STT not ready\"";
+        if (!wavFile.exists()) return "{\"error\":\"file not found: " + escJson(wavPath) + "\"}";
+        if (!speechEngine.isOfflineSttReady()) return "{\"error\":\"offline STT not ready\"}";
         return speechEngine.transcribeOffline(wavPath);
     }
 
@@ -1213,10 +1516,10 @@ public class BridgeServer {
         if (wavPath.isEmpty() && lastRecordingPath != null) {
             wavPath = lastRecordingPath;
         }
-        if (wavPath.isEmpty()) return "\"no audio file specified\"";
+        if (wavPath.isEmpty()) return "{\"error\":\"no audio file specified\"}";
         File wavFile = new File(wavPath);
-        if (!wavFile.exists()) return "\"file not found: " + escJson(wavPath) + "\"";
-        if (!speechEngine.isDiarizationReady()) return "\"diarization not ready\"";
+        if (!wavFile.exists()) return "{\"error\":\"file not found: " + escJson(wavPath) + "\"}";
+        if (!speechEngine.isDiarizationReady()) return "{\"error\":\"diarization not ready\"}";
         return speechEngine.diarize(wavPath);
     }
 
@@ -1373,7 +1676,8 @@ public class BridgeServer {
     }
 
     private String cmdBuddieListen(String args, final String msgId, final PrintWriter writer) {
-        int maxDuration = parseInt(args, 30);
+        int maxDuration = parseListenSeconds(args, 30);
+        boolean once = parseListenOnce(args);
 
         SpeechEngine.PartialCallback callback = null;
         if (writer != null) {
@@ -1391,9 +1695,9 @@ public class BridgeServer {
             };
         }
 
-        String result = buddieService.listen(maxDuration, callback);
+        String result = buddieService.listen(maxDuration, once, callback);
         if (writer != null) {
-            String finalResponse = "{\"id\":" + msgId + ",\"ok\":true,\"data\":" + result + "}";
+            String finalResponse = finalResponse(msgId, result);
             synchronized (writer) {
                 writer.println(finalResponse);
                 writer.flush();
@@ -1405,6 +1709,23 @@ public class BridgeServer {
 
     private String cmdBuddieStatus() {
         return buddieService.getStatus();
+    }
+
+    /**
+     * Toggle mixing of earbud speaker frames into the STT stream.
+     * Args: "on"/"off". Off (default) = mic only, so the assistant's own
+     * TTS through the earbuds isn't transcribed back.
+     */
+    private String cmdBuddieMix(String args) {
+        String v = unquote(args).trim().toLowerCase(Locale.US);
+        if (v.equals("on") || v.equals("true") || v.equals("1")) {
+            buddieService.setMixSpeakerAudio(true);
+        } else if (v.equals("off") || v.equals("false") || v.equals("0")) {
+            buddieService.setMixSpeakerAudio(false);
+        } else {
+            return "{\"error\":\"usage: buddie_mix on|off\"}";
+        }
+        return "{\"mix_speaker\":" + buddieService.getMixSpeakerAudio() + "}";
     }
 
     /* ---- System investigation commands ---- */

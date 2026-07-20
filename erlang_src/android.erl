@@ -25,6 +25,7 @@
 %% Public API
 -export([start_link/0, start_link/1, stop/0]).
 -export([call/1, call/2, call/3]).
+-export([subscribe_stream/1, unsubscribe_stream/0]).
 -export([device_info/0, battery/0, vibrate/0, vibrate/1]).
 -export([toast/1, notify/2]).
 -export([clipboard_get/0, clipboard_set/1]).
@@ -46,13 +47,17 @@
     host :: inet:hostname(),
     port :: inet:port_number(),
     next_id :: pos_integer(),
-    pending :: #{pos_integer() => {pid(), reference()}}
+    pending :: #{pos_integer() => {pid(), reference()}},
+    stream_sub :: pid() | undefined
 }).
 
 -define(SERVER, ?MODULE).
 -define(DEFAULT_PORT, 9877).
 -define(TIMEOUT, 5000).
 -define(SPEECH_TIMEOUT, 60000).
+%% App-private shared secret written by BridgeServer at startup; same-uid
+%% clients authenticate each connection with it.
+-define(TOKEN_PATH, "/data/data/com.example.beamapp/files/bridge_token").
 
 %%% ============================================================
 %%% Public API
@@ -70,6 +75,20 @@ call(Cmd) -> call(Cmd, <<>>, ?TIMEOUT).
 call(Cmd, Args) -> call(Cmd, Args, ?TIMEOUT).
 call(Cmd, Args, Timeout) ->
     gen_server:call(?SERVER, {cmd, Cmd, Args}, Timeout).
+
+%% @doc Subscribe to bridge stream events (partial STT results, audio chunks).
+%% Streaming commands (stream_listen, buddie_listen, remote_listen,
+%% gemma_stream) emit progress lines without an "ok" field before the final
+%% reply. The subscriber receives them as {android_stream_event, Id, Line}
+%% where Line is the raw JSON. Only one subscriber at a time.
+-spec subscribe_stream(pid()) -> ok.
+subscribe_stream(Pid) when is_pid(Pid) ->
+    gen_server:call(?SERVER, {subscribe_stream, Pid}).
+
+%% @doc Remove the stream event subscriber.
+-spec unsubscribe_stream() -> ok.
+unsubscribe_stream() ->
+    gen_server:call(?SERVER, unsubscribe_stream).
 
 %% ---- Device ----
 
@@ -170,7 +189,8 @@ init(Port) ->
         host = "127.0.0.1",
         port = Port,
         next_id = 1,
-        pending = #{}
+        pending = #{},
+        stream_sub = undefined
     }}.
 
 handle_call({cmd, Cmd, Args}, From, #state{socket = undefined} = State) ->
@@ -180,7 +200,11 @@ handle_call({cmd, Cmd, Args}, From, #state{socket = undefined} = State) ->
         {error, _} -> {reply, {error, not_connected}, State}
     end;
 handle_call({cmd, Cmd, Args}, From, State) ->
-    do_send(Cmd, Args, From, State).
+    do_send(Cmd, Args, From, State);
+handle_call({subscribe_stream, Pid}, _From, State) ->
+    {reply, ok, State#state{stream_sub = Pid}};
+handle_call(unsubscribe_stream, _From, State) ->
+    {reply, ok, State#state{stream_sub = undefined}}.
 
 handle_cast(_Msg, State) -> {noreply, State}.
 
@@ -203,13 +227,15 @@ handle_info({tcp, _Sock, Data}, State) ->
 
 handle_info({tcp_closed, _}, State) ->
     io:format("[android] Bridge connection closed, reconnecting...~n"),
+    State2 = fail_pending(closed, State),
     erlang:send_after(1000, self(), connect),
-    {noreply, State#state{socket = undefined}};
+    {noreply, State2#state{socket = undefined}};
 
 handle_info({tcp_error, _, Reason}, State) ->
     io:format("[android] Bridge TCP error: ~p~n", [Reason]),
+    State2 = fail_pending({tcp_error, Reason}, State),
     erlang:send_after(1000, self(), connect),
-    {noreply, State#state{socket = undefined}};
+    {noreply, State2#state{socket = undefined}};
 
 handle_info(_Info, State) -> {noreply, State}.
 
@@ -226,8 +252,24 @@ terminate(_Reason, #state{socket = Sock}) ->
 connect(#state{host = Host, port = Port} = State) ->
     case gen_tcp:connect(Host, Port, [binary, {active, true}, {packet, line},
                                        {buffer, 65536}], 2000) of
-        {ok, Sock} -> {ok, State#state{socket = Sock}};
+        {ok, Sock} ->
+            send_auth(Sock),
+            {ok, State#state{socket = Sock}};
         {error, _} = Err -> Err
+    end.
+
+%% Bridge auth: send the app-private token as the first line on every
+%% connection. The reply (id 0, never pending) is ignored by
+%% handle_response. If the token file is unreadable nothing is sent — that
+%% only works when the server has auth disabled too.
+send_auth(Sock) ->
+    case file:read_file(?TOKEN_PATH) of
+        {ok, Tok0} ->
+            Tok = escape_json(string:trim(Tok0)),
+            Line = <<"{\"id\":0,\"cmd\":\"auth\",\"args\":\"", Tok/binary, "\"}\n">>,
+            gen_tcp:send(Sock, Line);
+        {error, _} ->
+            ok
     end.
 
 do_send(Cmd, Args, From, #state{socket = Sock, next_id = Id, pending = Pend} = State) ->
@@ -250,26 +292,47 @@ do_send(Cmd, Args, From, #state{socket = Sock, next_id = Id, pending = Pend} = S
             {reply, {error, Reason}, State#state{socket = undefined}}
     end.
 
-handle_response(Line, #state{pending = Pend} = State) ->
+handle_response(Line, #state{pending = Pend, stream_sub = Sub} = State) ->
     %% Parse response: {"id":N,"ok":true/false,"data":...} or {"error":...}
     IdStr = json_get(Line, <<"id">>),
     Id = try binary_to_integer(IdStr) catch _:_ -> 0 end,
-    case maps:take(Id, Pend) of
-        {From, Pend2} ->
-            Ok = json_get(Line, <<"ok">>),
-            Result = case Ok of
-                <<"true">> ->
-                    RawData = json_get_raw(Line, <<"data">>),
-                    {ok, parse_value(RawData)};
-                _ ->
-                    ErrMsg = json_get(Line, <<"error">>),
-                    {error, ErrMsg}
+    case json_get(Line, <<"ok">>) of
+        <<>> ->
+            %% No "ok" field: a stream event (partial STT result, audio
+            %% chunk), not a reply. Forward to the subscriber if there is
+            %% one; never consume the pending request — the final reply is
+            %% still coming with the same id.
+            case Sub of
+                undefined -> ok;
+                Pid -> Pid ! {android_stream_event, Id, Line}
             end,
-            gen_server:reply(From, Result),
-            State#state{pending = Pend2};
-        error ->
-            State
+            State;
+        Ok ->
+            case maps:take(Id, Pend) of
+                {From, Pend2} ->
+                    Result = case Ok of
+                        <<"true">> ->
+                            RawData = json_get_raw(Line, <<"data">>),
+                            {ok, parse_value(RawData)};
+                        _ ->
+                            ErrMsg = json_get(Line, <<"error">>),
+                            {error, ErrMsg}
+                    end,
+                    gen_server:reply(From, Result),
+                    State#state{pending = Pend2};
+                error ->
+                    State
+            end
     end.
+
+%% Reply {error, ...} to every pending caller when the bridge connection
+%% drops, instead of letting them sit until their gen_server:call timeout.
+fail_pending(Reason, #state{pending = Pend} = State) ->
+    maps:foreach(
+        fun(_Id, From) ->
+            gen_server:reply(From, {error, {bridge_disconnected, Reason}})
+        end, Pend),
+    State#state{pending = #{}}.
 
 %%% ---- Minimal JSON helpers ----
 

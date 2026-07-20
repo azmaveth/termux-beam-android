@@ -7,6 +7,7 @@
 -export([asr_mode/0, set_asr_mode/1, remote_asr_node/0, set_remote_asr_node/1]).
 -export([hotwords/0, set_hotwords/1, clear_hotwords/0]).
 -export([remote_transcribe/1]).
+-export([extract_field/2]).
 
 -define(CONFIG_PATH, "/sdcard/.beam-config").
 -define(DEFAULT_ASR_NODE, 'arbor_gpu2@10.42.42.97').
@@ -164,42 +165,41 @@ set_remote_asr_node(Node) when is_atom(Node) ->
 %%% Local ASR (sherpa-onnx JNI)
 %%% ============================================================
 
+%% NOTE: android:call returns bridge JSON as a raw binary (android.erl does
+%% not decode objects into maps), so fields are extracted by scanning via
+%% extract_field/2. Bridge-side failures arrive as {error, Reason} since the
+%% bridge reports speech errors at the protocol level.
+
 local_listen(Seconds) ->
     Timeout = (Seconds + 5) * 1000,
     case android:call(<<"listen">>, integer_to_binary(Seconds), Timeout) of
-        {ok, Result} when is_map(Result) ->
-            case maps:get(<<"text">>, Result, <<>>) of
-                <<>> -> {error, Result};
+        {ok, Result} ->
+            case extract_field(Result, <<"text">>) of
+                <<>> -> {error, {no_text, Result}};
                 Text -> {ok, Text}
             end;
-        {ok, Result} -> {ok, Result};
-        {error, _} = Err -> Err;
-        Other -> {error, Other}
+        {error, _} = Err -> Err
     end.
 
 local_stream_listen(MaxSeconds) ->
     Timeout = (MaxSeconds + 5) * 1000,
     case android:call(<<"stream_listen">>, integer_to_binary(MaxSeconds), Timeout) of
-        {ok, Result} when is_map(Result) ->
-            case maps:get(<<"text">>, Result, <<>>) of
-                <<>> -> {error, Result};
+        {ok, Result} ->
+            case extract_field(Result, <<"text">>) of
+                <<>> -> {error, {no_text, Result}};
                 Text -> {ok, Text}
             end;
-        {ok, Result} -> {ok, Result};
-        {error, _} = Err -> Err;
-        Other -> {error, Other}
+        {error, _} = Err -> Err
     end.
 
 local_transcribe(WavPath) ->
     case android:call(<<"stt">>, WavPath, 30000) of
-        {ok, #{<<"text">> := Text}} when Text =/= <<>> ->
-            {ok, Text};
-        {ok, #{<<"error">> := Err}} ->
-            {error, Err};
-        {ok, Other} ->
-            {error, Other};
-        {error, _} = Err ->
-            Err
+        {ok, Result} ->
+            case extract_field(Result, <<"text">>) of
+                <<>> -> {error, {no_text, Result}};
+                Text -> {ok, Text}
+            end;
+        {error, _} = Err -> Err
     end.
 
 %%% ============================================================
@@ -215,7 +215,7 @@ remote_listen(Seconds) ->
     %%   {"status":"recording","path":"/data/.../rec_123.wav","duration":3}
     case android:call(<<"mic_record">>, integer_to_binary(Seconds), Timeout) of
         {ok, Result} ->
-            WavPath = extract_path(Result, <<>>),
+            WavPath = extract_field(Result, <<"path">>),
             %% Wait for recording to finish (recording auto-stops after duration)
             timer:sleep((Seconds + 1) * 1000),
             case WavPath of
@@ -230,22 +230,27 @@ remote_listen(Seconds) ->
         Other -> {error, Other}
     end.
 
-%% Extract "path" from a bridge response (may be a map or raw JSON string).
-extract_path(Result, Default) when is_map(Result) ->
-    maps:get(<<"path">>, Result, Default);
-extract_path(Result, Default) when is_binary(Result) ->
-    %% Try to find path in raw JSON string: "path":"..."
-    case binary:match(Result, <<"\"path\":\"">>) of
+%% Extract a string field from a bridge response (map or raw JSON binary).
+%% Handles escaped quotes/newlines inside string values.
+extract_field(Result, Key) when is_map(Result) ->
+    maps:get(Key, Result, <<>>);
+extract_field(Result, Key) when is_binary(Result) ->
+    Search = <<"\"", Key/binary, "\":\"">>,
+    case binary:match(Result, Search) of
         {Pos, Len} ->
             Start = Pos + Len,
             Rest = binary:part(Result, Start, byte_size(Result) - Start),
-            case binary:match(Rest, <<"\"">>) of
-                {QPos, _} -> binary:part(Rest, 0, QPos);
-                nomatch -> Default
-            end;
-        nomatch -> Default
+            take_string(Rest, <<>>);
+        nomatch -> <<>>
     end;
-extract_path(_, Default) -> Default.
+extract_field(_, _) -> <<>>.
+
+take_string(<<>>, Acc) -> Acc;
+take_string(<<"\\\"", T/binary>>, Acc) -> take_string(T, <<Acc/binary, "\"">>);
+take_string(<<"\\n", T/binary>>, Acc) -> take_string(T, <<Acc/binary, "\n">>);
+take_string(<<"\\\\", T/binary>>, Acc) -> take_string(T, <<Acc/binary, "\\">>);
+take_string(<<"\"", _/binary>>, Acc) -> Acc;
+take_string(<<C, T/binary>>, Acc) -> take_string(T, <<Acc/binary, C>>).
 
 %% @doc Send a WAV file to the remote ASR node for transcription.
 %% Includes local hotwords from /sdcard/.beam-dictionary if present.

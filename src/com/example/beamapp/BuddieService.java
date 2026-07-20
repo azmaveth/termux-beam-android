@@ -81,6 +81,12 @@ public class BuddieService {
     private final AtomicLong lastPacketTime = new AtomicLong(0);
     private volatile String lastTranscription = "";
 
+    // Bound the decoded-audio queue: if STT stalls, drop oldest instead of
+    // growing without limit. ~30 s of 16 kHz mono float audio.
+    private static final int MAX_QUEUED_SAMPLES = SAMPLE_RATE * 30;
+    private final AtomicInteger queuedSamples = new AtomicInteger(0);
+    private final AtomicInteger droppedChunks = new AtomicInteger(0);
+
     // PCA decode matrices (loaded from assets)
     private float[][] iPcaMatrix;  // 47 x 257
     private float[][] iDctMatrix;  // 257 x 257
@@ -89,8 +95,23 @@ public class BuddieService {
     private float[] pcaAccumulator = new float[BLOCK_NUM * (DCT_SIZE - 1)]; // 768
     private int pcaAccumPos = 0;
 
+    // Slow-AGC peak envelope for PCA audio (instant attack, slow release)
+    private float pcaPeakEnv = 0.01f;
+
     // Opus decoder via MediaCodec
     private MediaCodec opusDecoder;
+
+    /**
+     * When true, decoded earbud *speaker* frames are mixed into the STT
+     * stream alongside the mic (useful for transcribing media playback /
+     * both sides of a call). Off by default: in a conversation loop the
+     * assistant's own TTS comes back through the speaker frames and would
+     * transcribe itself.
+     */
+    private volatile boolean mixSpeakerAudio = false;
+
+    public void setMixSpeakerAudio(boolean mix) { this.mixSpeakerAudio = mix; }
+    public boolean getMixSpeakerAudio() { return mixSpeakerAudio; }
 
     public BuddieService(Context context, BluetoothAdapter btAdapter, SpeechEngine speechEngine) {
         this.context = context;
@@ -305,6 +326,7 @@ public class BuddieService {
 
             audioMode = "pca";
             pcaAccumPos = 0;
+            pcaPeakEnv = 0.01f;
             state = State.CONNECTED;
 
             // Wait to confirm packets are arriving
@@ -337,6 +359,15 @@ public class BuddieService {
      * Blocks until maxDurationSec elapsed, stopListening() called, or disconnect.
      */
     public String listen(int maxDurationSec, SpeechEngine.PartialCallback callback) {
+        return listen(maxDurationSec, false, callback);
+    }
+
+    /**
+     * Start streaming STT from earbud audio, optionally returning at the
+     * first utterance endpoint (once=true, conversation turn-taking) instead
+     * of listening for the full window.
+     */
+    public String listen(int maxDurationSec, boolean once, SpeechEngine.PartialCallback callback) {
         if (state != State.CONNECTED) {
             return "{\"error\":\"not connected (state=" + state.name() + ")\"}";
         }
@@ -346,12 +377,15 @@ public class BuddieService {
 
         state = State.LISTENING;
         audioQueue.clear();
+        queuedSamples.set(0);
         audioSourceActive.set(true);
 
         SpeechEngine.ExternalAudioSource source = new SpeechEngine.ExternalAudioSource() {
             @Override
             public float[] readChunk() {
-                return audioQueue.poll();
+                float[] c = audioQueue.poll();
+                if (c != null) queuedSamples.addAndGet(-c.length);
+                return c;
             }
 
             @Override
@@ -361,7 +395,7 @@ public class BuddieService {
         };
 
         try {
-            String result = speechEngine.streamFromExternalAudio(maxDurationSec, source, callback);
+            String result = speechEngine.streamFromExternalAudio(maxDurationSec, once, source, callback);
             lastTranscription = extractText(result);
             return result;
         } finally {
@@ -381,10 +415,29 @@ public class BuddieService {
         return "{\"state\":\"" + state.name().toLowerCase(Locale.US) + "\""
             + ",\"address\":\"" + escJson(connectedAddress != null ? connectedAddress : "") + "\""
             + ",\"mode\":\"" + audioMode + "\""
+            + ",\"mix_speaker\":" + mixSpeakerAudio
             + ",\"packets_received\":" + packetsReceived.get()
             + ",\"last_packet_ms\":" + lastPacketTime.get()
+            + ",\"queued_samples\":" + queuedSamples.get()
+            + ",\"dropped_chunks\":" + droppedChunks.get()
             + ",\"last_transcription\":\"" + escJson(lastTranscription) + "\""
             + "}";
+    }
+
+    /**
+     * Enqueue decoded audio for the STT consumer, dropping oldest chunks if
+     * the consumer stalls (bounded at ~30 s of audio).
+     */
+    private void enqueueAudio(float[] chunk) {
+        if (!audioSourceActive.get()) return;
+        audioQueue.offer(chunk);
+        int size = queuedSamples.addAndGet(chunk.length);
+        while (size > MAX_QUEUED_SAMPLES) {
+            float[] dropped = audioQueue.poll();
+            if (dropped == null) break;
+            size = queuedSamples.addAndGet(-dropped.length);
+            droppedChunks.incrementAndGet();
+        }
     }
 
     // ==== PCA decode pipeline ====
@@ -487,21 +540,22 @@ public class BuddieService {
             }
 
             // Scale to [-1, 1] range for STT.
-            // The PCA decode output is in a small range due to int8 quantization.
-            // Empirically scale up to make speech audible to the recognizer.
-            // We'll use automatic gain: normalize so blockMax maps to ~0.5
-            if (blockMax > 0.0001f) {
-                float gain = 0.5f / blockMax;
-                // Clamp gain to avoid amplifying noise too much
-                if (gain > 200.0f) gain = 200.0f;
-                for (int i = 0; i < raw.length; i++) {
-                    raw[i] = raw[i] * gain;
-                }
+            // The PCA decode output is in a small range due to int8
+            // quantization. Slow AGC: track a peak envelope (instant attack,
+            // slow release ≈3 s) and normalize toward 0.5 peak. The old
+            // per-block peak normalization boosted the noise floor between
+            // words to full scale, which fed the VAD loud "silence".
+            if (blockMax > pcaPeakEnv) {
+                pcaPeakEnv = blockMax;
+            } else {
+                pcaPeakEnv += (blockMax - pcaPeakEnv) * 0.005f;
+            }
+            float gain = 0.5f / Math.max(pcaPeakEnv, 0.0025f); // clamp ≤200x
+            for (int i = 0; i < raw.length; i++) {
+                raw[i] = raw[i] * gain;
             }
 
-            if (audioSourceActive.get()) {
-                audioQueue.offer(raw);
-            }
+            enqueueAudio(raw);
         }
 
         if (dbgAudioCount % 100 == 0) {
@@ -655,7 +709,7 @@ public class BuddieService {
         if (!micActive && !spkActive) return;
 
         float[] micPcm = micActive ? decodeOpusFrame(micFrame) : null;
-        float[] spkPcm = spkActive ? decodeOpusFrame(spkFrame) : null;
+        float[] spkPcm = (mixSpeakerAudio && spkActive) ? decodeOpusFrame(spkFrame) : null;
 
         float[] mixed;
         if (micPcm != null && spkPcm != null) {
@@ -674,9 +728,7 @@ public class BuddieService {
             return;
         }
 
-        if (audioSourceActive.get()) {
-            audioQueue.offer(mixed);
-        }
+        enqueueAudio(mixed);
     }
 
     // ==== Cleanup ====
@@ -695,6 +747,7 @@ public class BuddieService {
         }
         releaseOpusDecoder();
         audioQueue.clear();
+        queuedSamples.set(0);
         audioMode = "none";
         state = State.DISCONNECTED;
     }

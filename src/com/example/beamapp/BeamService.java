@@ -213,6 +213,7 @@ public class BeamService extends Service {
                         "io:format(\"  packages, brightness, procs, prop <name>,~n\"), " +
                         "io:format(\"  services, features, shell <cmd>,~n\"), " +
                         "io:format(\"  say <text>, listen [secs], stream_listen [secs],~n\"), " +
+                        "io:format(\"  stop, tts_stop, enroll <name>, verify [name], speakers,~n\"), " +
                         "io:format(\"  record [secs], stt [path], transcribe [path],~n\"), " +
                         "io:format(\"  diarize [path], speech_status,~n\"), " +
                         "io:format(\"  bt_status, bt_bonded, bt_connected,~n\"), " +
@@ -267,8 +268,8 @@ public class BeamService extends Service {
                         /* Start command TCP server on 9876 for interactive use */
                         "CmdPort = 9876, " +
                         "{ok, LSock} = gen_tcp:listen(CmdPort, " +
-                        "  [binary, {active, false}, {reuseaddr, true}, {packet, 0}]), " +
-                        "io:format(\"Command server on port ~p. Send commands!~n~n\", [CmdPort]), " +
+                        "  [binary, {active, false}, {reuseaddr, true}, {ip, {127,0,0,1}}, {packet, 0}]), " +
+                        "io:format(\"Command server on 127.0.0.1:~p. Send commands!~n~n\", [CmdPort]), " +
 
                         "HandleCmd = fun HandleC(S) -> " +
                         "  case gen_tcp:recv(S, 0, 60000) of " +
@@ -324,6 +325,12 @@ public class BeamService extends Service {
                         "          <<\"stream_listen \", Dur/binary>> -> " +
                         "            Secs2 = binary_to_integer(string:trim(Dur)), " +
                         "            android:call(<<\"stream_listen\">>, Dur, (Secs2 + 5) * 1000); " +
+                        "          <<\"stop\">> -> android:call(<<\"stop_listen\">>, <<>>, 5000); " +
+                        "          <<\"tts_stop\">> -> android:call(<<\"tts_stop\">>, <<>>, 5000); " +
+                        "          <<\"enroll \", EnName/binary>> -> android:call(<<\"speaker_enroll\">>, EnName, 20000); " +
+                        "          <<\"verify\">> -> android:call(<<\"speaker_verify\">>, <<>>, 20000); " +
+                        "          <<\"verify \", VfName/binary>> -> android:call(<<\"speaker_verify\">>, VfName, 20000); " +
+                        "          <<\"speakers\">> -> android:call(<<\"speaker_list\">>); " +
                         "          <<\"speech_status\">> -> android:call(<<\"speech_status\">>); " +
                         "          <<\"record\">> -> android:call(<<\"mic_record\">>, <<\"5\">>); " +
                         "          <<\"record \", Dur/binary>> -> android:call(<<\"mic_record\">>, Dur); " +
@@ -430,7 +437,8 @@ public class BeamService extends Service {
                         "          _ -> {ok, <<\"Unknown: \", Cmd/binary, " +
                         "            \". Try: device battery memory wifi sensors eval <expr> \" " +
                         "            \"load_module <name> <base64> modules \" " +
-                        "            \"say <text> listen [secs] stream_listen [secs] \" " +
+                        "            \"say <text> listen [secs] stream_listen [secs] stop tts_stop \" " +
+                        "            \"enroll <name> verify [name] speakers \" " +
                         "            \"bt_status bt_scan [secs] bt_scan_ble [secs] \" " +
                         "            \"node nodes connect <n> disconnect <n> rpc <n> <m> <f> [args]\">>} " +
                         "        end " +
@@ -448,11 +456,35 @@ public class BeamService extends Service {
                         "      io:format(\"Client disconnected~n\"), ok " +
                         "  end " +
                         "end, " +
+                        /* Per-connection auth gate: same app-private token as the
+                         * bridge (files/bridge_token). First line must be
+                         * "auth <token>"; reply is "ok". No token file (or the
+                         * bridge_auth_disabled flag) = no auth required. */
+                        "CheckAuth = fun(S) -> " +
+                        "  AuthDisabled = filelib:is_regular(\"/data/data/com.example.beamapp/files/bridge_auth_disabled\"), " +
+                        "  case file:read_file(\"/data/data/com.example.beamapp/files/bridge_token\") of " +
+                        "    {ok, Tok0} when not AuthDisabled -> " +
+                        "      Tok = string:trim(Tok0), " +
+                        "      case gen_tcp:recv(S, 0, 10000) of " +
+                        "        {ok, First} -> " +
+                        "          case string:trim(First) of " +
+                        "            <<\"auth \", Given/binary>> -> " +
+                        "              case string:trim(Given) of " +
+                        "                Tok -> gen_tcp:send(S, <<\"ok\\n\">>), ok; " +
+                        "                _ -> gen_tcp:send(S, <<\"ERROR: auth failed\\n\">>), gen_tcp:close(S), denied " +
+                        "              end; " +
+                        "            _ -> gen_tcp:send(S, <<\"ERROR: auth required\\n\">>), gen_tcp:close(S), denied " +
+                        "          end; " +
+                        "        _ -> gen_tcp:close(S), denied " +
+                        "      end; " +
+                        "    _ -> ok " +
+                        "  end " +
+                        "end, " +
                         "AcceptLoop = fun Loop() -> " +
                         "  case gen_tcp:accept(LSock) of " +
                         "    {ok, Sock} -> " +
                         "      io:format(\"Client connected~n\"), " +
-                        "      spawn(fun() -> HandleCmd(Sock) end), " +
+                        "      spawn(fun() -> case CheckAuth(Sock) of ok -> HandleCmd(Sock); _ -> ok end end), " +
                         "      Loop(); " +
                         "    {error, _} -> ok " +
                         "  end " +

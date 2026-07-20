@@ -170,6 +170,23 @@ public class DictionaryActivity extends Activity {
     }
 
     /**
+     * Authenticate a 9876 command-port connection using the app-private
+     * bridge token (consumes the reply). No-op when no token exists.
+     */
+    private void authBeamPort(OutputStream os, BufferedReader br) throws Exception {
+        if (new java.io.File(getFilesDir(), "bridge_auth_disabled").exists()) return;
+        java.io.File f = new java.io.File(getFilesDir(), "bridge_token");
+        if (!f.exists()) return;
+        BufferedReader tr = new BufferedReader(new java.io.FileReader(f));
+        String tok = tr.readLine();
+        tr.close();
+        if (tok == null || tok.trim().isEmpty()) return;
+        os.write(("auth " + tok.trim() + "\n").getBytes());
+        os.flush();
+        br.read(new char[64]);
+    }
+
+    /**
      * Evaluate an Erlang expression on the local BEAM node via the command port.
      */
     private String evalBeam(String expression) {
@@ -177,6 +194,7 @@ public class DictionaryActivity extends Activity {
             sock.setSoTimeout(15000);
             OutputStream os = sock.getOutputStream();
             BufferedReader br = new BufferedReader(new InputStreamReader(sock.getInputStream()));
+            authBeamPort(os, br);
             os.write(("eval " + expression).getBytes());
             os.flush();
             char[] buf = new char[65536];

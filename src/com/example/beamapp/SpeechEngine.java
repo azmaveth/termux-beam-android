@@ -1,11 +1,15 @@
 package com.example.beamapp;
 
 import android.content.Context;
+import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
 import android.media.MediaRecorder;
+import android.media.audiofx.AcousticEchoCanceler;
+import android.media.audiofx.NoiseSuppressor;
+import android.os.PowerManager;
 import android.util.Log;
 
 import com.k2fsa.sherpa.onnx.*;
@@ -57,6 +61,20 @@ public class SpeechEngine {
     // Streaming listen state
     private final AtomicBoolean listening = new AtomicBoolean(false);
     private volatile String partialResult = "";
+
+    // TTS playback state (streamed, cancelable)
+    private final Object ttsPlaybackLock = new Object();
+    private volatile AudioTrack ttsTrack;
+    private final AtomicBoolean ttsCancel = new AtomicBoolean(false);
+
+    // Mic arbiter: one owner at a time so concurrent captures fail with a
+    // descriptive "mic busy (<holder>)" instead of a cryptic init error.
+    private final Object micLock = new Object();
+    private String micHolder = null;
+
+    // CPU wake lock held while capturing audio so Doze doesn't starve
+    // long-running listens. Reference-counted; 30 min safety timeout.
+    private PowerManager.WakeLock listenWakeLock;
 
     // Pre-recording mic buffer to capture audio before stream_listen dispatch
     private AudioRecord preMic;
@@ -453,7 +471,6 @@ public class SpeechEngine {
     public int getTtsNumSpeakers() { return tts != null ? tts.getNumSpeakers() : 0; }
 
     /** Speak text via local TTS engine, playing through AudioTrack. Returns when done. */
-    @SuppressWarnings("deprecation")
     public String speak(String text) { return speak(text, 5, 1.0f); }
 
     /** Generate TTS audio and save to a WAV file without playing. For evals/testing. */
@@ -515,53 +532,112 @@ public class SpeechEngine {
         out.close();
     }
 
-    @SuppressWarnings("deprecation")
+    /**
+     * Speak via local TTS, streaming generated chunks into an AudioTrack as
+     * they arrive: time-to-first-audio ≈ first chunk generation instead of
+     * the whole utterance. Cancelable via stopSpeaking(). Concurrent callers
+     * are serialized. Reports gen_ms and first_audio_ms (VOICE-32).
+     */
     public String speak(String text, int speakerId, float speed) {
         if (tts == null) return "{\"error\":\"TTS not initialized\"}";
         if (text == null || text.isEmpty()) return "{\"error\":\"empty text\"}";
 
-        try {
-            long t0 = System.currentTimeMillis();
-            GeneratedAudio audio = tts.generate(text, speakerId, speed);
-            long genMs = System.currentTimeMillis() - t0;
+        synchronized (ttsPlaybackLock) {
+            ttsCancel.set(false);
+            AudioTrack track = null;
+            try {
+                final int sampleRate = tts.getSampleRate();
+                int minBuf = AudioTrack.getMinBufferSize(sampleRate,
+                    AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
+                track = new AudioTrack(
+                    new AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build(),
+                    new AudioFormat.Builder()
+                        .setSampleRate(sampleRate)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build(),
+                    Math.max(minBuf * 2, sampleRate), // ≥ 0.5 s of buffer
+                    AudioTrack.MODE_STREAM,
+                    AudioManager.AUDIO_SESSION_ID_GENERATE);
+                ttsTrack = track;
+                track.play();
 
-            float[] samples = audio.getSamples();
-            int sampleRate = audio.getSampleRate();
-            if (samples == null || samples.length == 0) {
-                return "{\"error\":\"TTS generated no audio\"}";
+                final AudioTrack playTrack = track;
+                final long t0 = System.currentTimeMillis();
+                final long[] firstAudioMs = { -1 };
+                final long[] totalSamples = { 0 };
+
+                tts.generateWithCallback(text, speakerId, speed,
+                    new OfflineTtsCallback() {
+                        @Override
+                        public Integer invoke(float[] samples) {
+                            if (ttsCancel.get()) return 0; // abort generation
+                            if (firstAudioMs[0] < 0) {
+                                firstAudioMs[0] = System.currentTimeMillis() - t0;
+                            }
+                            short[] pcm = new short[samples.length];
+                            for (int i = 0; i < samples.length; i++) {
+                                float s = Math.max(-1.0f, Math.min(1.0f, samples[i]));
+                                pcm[i] = (short) (s * 32767);
+                            }
+                            // Blocking write paces generation to playback
+                            playTrack.write(pcm, 0, pcm.length);
+                            totalSamples[0] += samples.length;
+                            return ttsCancel.get() ? 0 : 1;
+                        }
+                    });
+                long genMs = System.currentTimeMillis() - t0;
+
+                if (totalSamples[0] == 0 && !ttsCancel.get()) {
+                    return "{\"error\":\"TTS generated no audio\"}";
+                }
+
+                // Wait for the buffered tail to finish playing (or cancel)
+                long deadline = System.currentTimeMillis() + 30000;
+                while (!ttsCancel.get()
+                        && track.getPlaybackHeadPosition() < totalSamples[0]
+                        && System.currentTimeMillis() < deadline) {
+                    Thread.sleep(20);
+                }
+
+                float durationSec = (float) totalSamples[0] / sampleRate;
+                boolean cancelled = ttsCancel.get();
+                return "{\"status\":\"" + (cancelled ? "cancelled" : "ok")
+                    + "\",\"text\":\"" + escJson(text)
+                    + "\",\"duration\":" + String.format("%.1f", durationSec)
+                    + ",\"gen_ms\":" + genMs
+                    + ",\"first_audio_ms\":" + (firstAudioMs[0] < 0 ? genMs : firstAudioMs[0])
+                    + "}";
+            } catch (Exception e) {
+                Log.e(TAG, "TTS speak failed", e);
+                return "{\"error\":\"" + escJson(e.getMessage()) + "\"}";
+            } finally {
+                ttsTrack = null;
+                if (track != null) {
+                    try { track.stop(); } catch (Exception ignored) {}
+                    track.release();
+                }
             }
-
-            short[] pcm = new short[samples.length];
-            for (int i = 0; i < samples.length; i++) {
-                float s = Math.max(-1.0f, Math.min(1.0f, samples[i]));
-                pcm[i] = (short) (s * 32767);
-            }
-
-            int bufSize = AudioTrack.getMinBufferSize(sampleRate,
-                AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
-            AudioTrack track = new AudioTrack(
-                AudioManager.STREAM_MUSIC,
-                sampleRate,
-                AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                Math.max(bufSize, pcm.length * 2),
-                AudioTrack.MODE_STATIC);
-
-            track.write(pcm, 0, pcm.length);
-            track.play();
-
-            float durationSec = (float) samples.length / sampleRate;
-            Thread.sleep((long) (durationSec * 1000) + 200);
-            track.stop();
-            track.release();
-
-            return "{\"status\":\"ok\",\"text\":\"" + escJson(text)
-                + "\",\"duration\":" + String.format("%.1f", durationSec)
-                + ",\"gen_ms\":" + genMs + "}";
-        } catch (Exception e) {
-            Log.e(TAG, "TTS speak failed", e);
-            return "{\"error\":\"" + escJson(e.getMessage()) + "\"}";
         }
+    }
+
+    /**
+     * Cancel in-progress TTS playback. Returns immediately; the speak() call
+     * unblocks, stops generation, and reports status "cancelled".
+     */
+    public String stopSpeaking() {
+        ttsCancel.set(true);
+        AudioTrack track = ttsTrack;
+        if (track != null) {
+            // pause+flush discards buffered audio and unblocks a pending
+            // blocking write in the generation callback.
+            try { track.pause(); track.flush(); } catch (Exception ignored) {}
+            return "{\"status\":\"stopping\"}";
+        }
+        return "{\"status\":\"idle\"}";
     }
 
     /** Transcribe a WAV file using streaming recognizer (batch mode). */
@@ -730,22 +806,107 @@ public class SpeechEngine {
     }
 
     /**
+     * Try to claim the mic for `who`. Returns null on success, or the name
+     * of the current holder (for a descriptive "mic busy" error).
+     */
+    public String claimMic(String who) {
+        synchronized (micLock) {
+            if (micHolder != null) return micHolder;
+            micHolder = who;
+            return null;
+        }
+    }
+
+    /** Release the mic claim if `who` still holds it. */
+    public void releaseMic(String who) {
+        synchronized (micLock) {
+            if (who.equals(micHolder)) micHolder = null;
+        }
+    }
+
+    /** Acquire the capture wake lock (reference-counted, 30 min safety cap). */
+    public void acquireListenLock() {
+        try {
+            synchronized (this) {
+                if (listenWakeLock == null) {
+                    PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+                    listenWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "beamapp:listen");
+                    listenWakeLock.setReferenceCounted(true);
+                }
+            }
+            listenWakeLock.acquire(30 * 60 * 1000L);
+        } catch (Exception e) {
+            Log.w(TAG, "Wake lock acquire failed", e);
+        }
+    }
+
+    /** Release one reference on the capture wake lock. */
+    public void releaseListenLock() {
+        try {
+            if (listenWakeLock != null && listenWakeLock.isHeld()) listenWakeLock.release();
+        } catch (Exception e) {
+            Log.w(TAG, "Wake lock release failed", e);
+        }
+    }
+
+    /**
+     * Open the mic for speech recognition: VOICE_RECOGNITION source (platform
+     * tuning for ASR) with echo cancellation and noise suppression attached
+     * when the device supports them. Without AEC, the phone's own TTS output
+     * re-enters the recognizer in VAD/continuous modes.
+     * Returns null if the mic is unavailable.
+     * Callers are expected to hold a mic claim (claimMic) first.
+     */
+    @SuppressWarnings("MissingPermission")
+    AudioRecord openMic() {
+        int bufSize = Math.max(
+            AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT),
+            SAMPLE_RATE * 2);
+        AudioRecord mic;
+        try {
+            mic = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize);
+        } catch (Exception e) {
+            Log.w(TAG, "Mic open failed", e);
+            return null;
+        }
+        if (mic.getState() != AudioRecord.STATE_INITIALIZED) {
+            mic.release();
+            return null;
+        }
+        try {
+            int session = mic.getAudioSessionId();
+            if (AcousticEchoCanceler.isAvailable()) {
+                AcousticEchoCanceler aec = AcousticEchoCanceler.create(session);
+                if (aec != null) aec.setEnabled(true);
+            }
+            if (NoiseSuppressor.isAvailable()) {
+                NoiseSuppressor ns = NoiseSuppressor.create(session);
+                if (ns != null) ns.setEnabled(true);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "AEC/NS setup failed (continuing without)", e);
+        }
+        return mic;
+    }
+
+    /**
      * Start pre-recording mic into a ring buffer so we capture audio
      * before stream_listen is actually dispatched. Call when user taps Listen.
      */
     @SuppressWarnings("MissingPermission")
     public void startPreRecord() {
         if (preRecording) return;
+        String busy = claimMic("pre_record");
+        if (busy != null) {
+            Log.i(TAG, "Pre-record skipped: mic busy (" + busy + ")");
+            return;
+        }
         try {
-            int bufSize = Math.max(
-                AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT),
-                SAMPLE_RATE * 2);
-            preMic = new AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize);
-            if (preMic.getState() != AudioRecord.STATE_INITIALIZED) {
-                preMic.release();
-                preMic = null;
+            preMic = openMic();
+            if (preMic == null) {
+                releaseMic("pre_record");
                 return;
             }
             // Ring buffer: 1.5 seconds of lookback
@@ -776,41 +937,72 @@ public class SpeechEngine {
             Log.w(TAG, "Pre-record failed", e);
             preRecording = false;
             if (preMic != null) { preMic.release(); preMic = null; }
+            releaseMic("pre_record");
         }
     }
 
     /**
      * Stop the pre-record thread and take ownership of the mic (don't release it).
      * Returns the buffered lookback audio and the still-recording AudioRecord.
+     * If a mic is returned, the mic claim transfers from "pre_record" to
+     * `newHolder` with no gap.
      */
-    private AudioRecord takePreRecordMic(float[][] lookbackOut) {
-        preRecording = false;
-        if (preRecordThread != null) {
-            try { preRecordThread.join(500); } catch (Exception ignored) {}
-            preRecordThread = null;
-        }
-        // Extract lookback audio from ring buffer
-        if (preBuffer != null) {
-            synchronized (preBuffer) {
-                int total = Math.min(preBufferFilled, preBuffer.length);
-                if (total > 0) {
-                    float[] result = new float[total];
-                    if (preBufferFilled >= preBuffer.length) {
-                        int firstLen = preBuffer.length - preBufferPos;
-                        System.arraycopy(preBuffer, preBufferPos, result, 0, firstLen);
-                        System.arraycopy(preBuffer, 0, result, firstLen, preBufferPos);
-                    } else {
-                        System.arraycopy(preBuffer, 0, result, 0, total);
-                    }
-                    lookbackOut[0] = result;
-                }
-                preBuffer = null;
+    private AudioRecord takePreRecordMic(float[][] lookbackOut, String newHolder) {
+        synchronized (micLock) {
+            preRecording = false;
+            if (preRecordThread != null) {
+                try { preRecordThread.join(500); } catch (Exception ignored) {}
+                preRecordThread = null;
             }
+            // Extract lookback audio from ring buffer
+            if (preBuffer != null) {
+                synchronized (preBuffer) {
+                    int total = Math.min(preBufferFilled, preBuffer.length);
+                    if (total > 0) {
+                        float[] result = new float[total];
+                        if (preBufferFilled >= preBuffer.length) {
+                            int firstLen = preBuffer.length - preBufferPos;
+                            System.arraycopy(preBuffer, preBufferPos, result, 0, firstLen);
+                            System.arraycopy(preBuffer, 0, result, firstLen, preBufferPos);
+                        } else {
+                            System.arraycopy(preBuffer, 0, result, 0, total);
+                        }
+                        lookbackOut[0] = result;
+                    }
+                    preBuffer = null;
+                }
+            }
+            // Return the mic — still recording, caller takes ownership
+            AudioRecord mic = preMic;
+            preMic = null;
+            if (mic != null && "pre_record".equals(micHolder)) {
+                micHolder = newHolder;
+            }
+            return mic;
         }
-        // Return the mic — still recording, caller takes ownership
-        AudioRecord mic = preMic;
-        preMic = null;
-        return mic;
+    }
+
+    /**
+     * Stop pre-record without a taker: stop the thread, release the mic and
+     * the claim. Previously this path leaked an open, recording AudioRecord
+     * if no listen ever took the pre-record mic over.
+     */
+    private void cancelPreRecord() {
+        synchronized (micLock) {
+            if (!preRecording && preMic == null) return;
+            preRecording = false;
+            if (preRecordThread != null) {
+                try { preRecordThread.join(500); } catch (Exception ignored) {}
+                preRecordThread = null;
+            }
+            if (preMic != null) {
+                try { preMic.stop(); } catch (Exception ignored) {}
+                preMic.release();
+                preMic = null;
+            }
+            preBuffer = null;
+            if ("pre_record".equals(micHolder)) micHolder = null;
+        }
     }
 
     /**
@@ -819,33 +1011,40 @@ public class SpeechEngine {
      * On recognizer endpoint, finalizes the current utterance and starts a new one.
      * Reuses the pre-record mic if available (no audio gap).
      */
-    @SuppressWarnings("MissingPermission")
     public String streamListen(int maxDurationSec, PartialCallback partialCallback) {
+        return streamListen(maxDurationSec, false, partialCallback);
+    }
+
+    /**
+     * Stream-listen with optional endpoint-return: when stopAtEndpoint is
+     * true, returns as soon as the first complete utterance is detected
+     * (conversation turn-taking) instead of listening for the full window.
+     */
+    @SuppressWarnings("MissingPermission")
+    public String streamListen(int maxDurationSec, boolean stopAtEndpoint,
+            PartialCallback partialCallback) {
         if (recognizer == null) return "{\"error\":\"STT not initialized\"}";
 
         listening.set(true);
         partialResult = "";
 
-        // Take over the pre-record mic (still recording, no gap)
+        // Take over the pre-record mic (still recording, no gap; claim
+        // transfers with it)
         float[][] lookbackHolder = new float[1][];
-        AudioRecord mic = takePreRecordMic(lookbackHolder);
+        AudioRecord mic = takePreRecordMic(lookbackHolder, "stream_listen");
         float[] lookback = lookbackHolder[0];
-        boolean micOwned = (mic != null);
+        boolean micClaimed = (mic != null);
 
         OnlineStream stream = null;
+        acquireListenLock();
         try {
             // If no pre-record mic, create a new one
             if (mic == null) {
-                int bufSize = Math.max(
-                    AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
-                        AudioFormat.ENCODING_PCM_16BIT),
-                    SAMPLE_RATE * 2);
-                mic = new AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE,
-                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize);
-                if (mic.getState() != AudioRecord.STATE_INITIALIZED) {
-                    mic.release();
-                    return "{\"error\":\"mic not available\"}";
-                }
+                String busy = claimMic("stream_listen");
+                if (busy != null) return "{\"error\":\"mic busy (" + busy + ")\"}";
+                micClaimed = true;
+                mic = openMic();
+                if (mic == null) return "{\"error\":\"mic not available\"}";
                 mic.startRecording();
             }
 
@@ -863,6 +1062,7 @@ public class SpeechEngine {
 
             long startTime = System.currentTimeMillis();
             long maxMs = maxDurationSec * 1000L;
+            long utteranceEndTs = 0;
             short[] buf = new short[SAMPLE_RATE / 10]; // 100ms chunks
             float[] floatBuf = new float[buf.length];
             String lastPartial = "";
@@ -910,6 +1110,11 @@ public class SpeechEngine {
                     if (!text.isEmpty()) {
                         if (allText.length() > 0) allText.append(" ");
                         allText.append(text);
+                        utteranceEndTs = System.currentTimeMillis();
+                        if (stopAtEndpoint) {
+                            recognizer.reset(stream);
+                            break;
+                        }
                     }
                     recognizer.reset(stream);
                 }
@@ -927,6 +1132,7 @@ public class SpeechEngine {
             if (!tailText.isEmpty()) {
                 if (allText.length() > 0) allText.append(" ");
                 allText.append(tailText);
+                utteranceEndTs = System.currentTimeMillis();
             }
 
             String finalText = allText.toString().trim();
@@ -937,9 +1143,13 @@ public class SpeechEngine {
 
             long elapsed = System.currentTimeMillis() - startTime;
 
+            // utterance_end_ts: epoch ms of the last finalized utterance —
+            // lets the caller compute end-of-utterance→response latency
+            // (VOICE-32 telemetry).
             return "{\"text\":\"" + escJson(punctuated)
                 + "\",\"duration\":" + String.format("%.1f", elapsed / 1000.0)
-                + ",\"elapsed_ms\":" + elapsed + "}";
+                + ",\"elapsed_ms\":" + elapsed
+                + ",\"utterance_end_ts\":" + utteranceEndTs + "}";
         } catch (Exception e) {
             Log.e(TAG, "Stream listen failed", e);
             return "{\"error\":\"" + escJson(e.getMessage()) + "\"}";
@@ -950,13 +1160,16 @@ public class SpeechEngine {
                 try { mic.stop(); } catch (Exception ignored) {}
                 mic.release();
             }
+            if (micClaimed) releaseMic("stream_listen");
+            releaseListenLock();
         }
     }
 
     public void stopListening() {
         listening.set(false);
-        // Clean up pre-record if it's still running
-        preRecording = false;
+        // Clean up pre-record if it's still running (releases the mic and
+        // its claim if no listen ever took it over)
+        cancelPreRecord();
     }
     public String getPartialResult() { return partialResult; }
 
@@ -974,6 +1187,9 @@ public class SpeechEngine {
     public boolean isOfflineSttReady() { return offlineRecognizer != null; }
     public boolean isDiarizationReady() { return diarizer != null; }
 
+    /** Path of the speaker embedding model (also used by SpeakerId), or null. */
+    public String getEmbeddingModelPath() { return embeddingModelPath; }
+
     public void release() {
         if (recognizer != null) { recognizer.release(); recognizer = null; }
         if (vad != null) { vad.release(); vad = null; }
@@ -983,24 +1199,52 @@ public class SpeechEngine {
         if (diarizer != null) { diarizer.release(); diarizer = null; }
     }
 
-    /** Read 16-bit mono 16kHz WAV file and return float samples */
-    private float[] readWavSamples(String path) throws Exception {
+    /**
+     * Read a 16-bit mono 16kHz WAV file and return float samples.
+     * Walks RIFF chunks to find "data" instead of assuming a 44-byte header,
+     * so files with LIST/fact chunks parse correctly. Non-RIFF files fall
+     * back to the legacy skip-44 behavior.
+     */
+    float[] readWavSamples(String path) throws Exception {
         RandomAccessFile raf = new RandomAccessFile(path, "r");
-        raf.seek(44);
-        long dataLen = raf.length() - 44;
-        if (dataLen <= 0) { raf.close(); return null; }
+        try {
+            if (raf.length() < 12) return null;
+            byte[] hdr = new byte[12];
+            raf.readFully(hdr);
+            boolean riff = hdr[0] == 'R' && hdr[1] == 'I' && hdr[2] == 'F' && hdr[3] == 'F'
+                && hdr[8] == 'W' && hdr[9] == 'A' && hdr[10] == 'V' && hdr[11] == 'E';
+            long dataLen = -1;
+            if (riff) {
+                while (raf.getFilePointer() + 8 <= raf.length()) {
+                    byte[] ch = new byte[8];
+                    raf.readFully(ch);
+                    long size = (ch[4] & 0xFFL) | ((ch[5] & 0xFFL) << 8)
+                        | ((ch[6] & 0xFFL) << 16) | ((ch[7] & 0xFFL) << 24);
+                    if (ch[0] == 'd' && ch[1] == 'a' && ch[2] == 't' && ch[3] == 'a') {
+                        dataLen = Math.min(size, raf.length() - raf.getFilePointer());
+                        break;
+                    }
+                    raf.seek(raf.getFilePointer() + size + (size & 1)); // chunks are word-aligned
+                }
+                if (dataLen < 0) return null;
+            } else {
+                raf.seek(44);
+                dataLen = raf.length() - 44;
+            }
+            if (dataLen <= 0) return null;
 
-        int numSamples = (int) (dataLen / 2);
-        float[] samples = new float[numSamples];
-        byte[] raw = new byte[(int) dataLen];
-        raf.readFully(raw);
-        raf.close();
-
-        for (int i = 0; i < numSamples; i++) {
-            short s = (short) ((raw[i * 2] & 0xFF) | (raw[i * 2 + 1] << 8));
-            samples[i] = s / 32768.0f;
+            int numSamples = (int) (dataLen / 2);
+            float[] samples = new float[numSamples];
+            byte[] raw = new byte[numSamples * 2];
+            raf.readFully(raw);
+            for (int i = 0; i < numSamples; i++) {
+                short s = (short) ((raw[i * 2] & 0xFF) | (raw[i * 2 + 1] << 8));
+                samples[i] = s / 32768.0f;
+            }
+            return samples;
+        } finally {
+            raf.close();
         }
-        return samples;
     }
 
     private static String escJson(String s) {
@@ -1015,43 +1259,47 @@ public class SpeechEngine {
      */
     public String streamFromExternalAudio(int maxDurationSec,
             ExternalAudioSource source, PartialCallback partialCallback) {
+        return streamFromExternalAudio(maxDurationSec, false, source, partialCallback);
+    }
+
+    /**
+     * External-audio stream-listen with optional endpoint-return
+     * (stopAtEndpoint — see streamListen). VAD gating with pre-roll and
+     * hysteresis lives in VadSegmenter; gated windows feed the recognizer.
+     */
+    public String streamFromExternalAudio(int maxDurationSec, boolean stopAtEndpoint,
+            ExternalAudioSource source, PartialCallback partialCallback) {
         if (recognizer == null) return "{\"error\":\"STT not initialized\"}";
 
         listening.set(true);
         partialResult = "";
         OnlineStream stream = null;
 
+        acquireListenLock();
         try {
             stream = recognizer.createStream();
 
             long startTime = System.currentTimeMillis();
             long maxMs = maxDurationSec * 1000L;
+            long utteranceEndTs = 0;
             String lastPartial = "";
             StringBuilder allText = new StringBuilder();
 
-            // VAD gating: accumulate chunks into 512-sample windows
-            // Pre-roll: keep a ring buffer of recent silence frames so that when
-            // speech is first detected, we flush the last ~480ms of audio to the
-            // recognizer. Without this, the attack of the first word is lost
-            // because VAD needs some energy to confirm speech.
-            //
-            // Hysteresis: once in speech, keep forwarding audio for ~320ms after
-            // VAD first reports silence. This captures trailing consonants and
-            // short inter-word pauses that would otherwise be clipped.
             boolean useVad = (vad != null);
-            int vadWindow = 512;
-            float[] vadBuf = useVad ? new float[vadWindow] : null;
-            int vadBufPos = 0;
-            int vadSpeechFrames = 0, vadSilenceFrames = 0;
-            // Pre-roll ring buffer: 15 * 512 samples @ 16kHz = ~480ms lookback
-            final int preRollFrames = 15;
-            float[][] preRoll = useVad ? new float[preRollFrames][] : null;
-            int preRollPos = 0;
-            // Hysteresis: grace period of silence frames that still forward audio
-            final int silenceGraceThreshold = 10; // ~320ms @ 16kHz, 512 samples per frame
-            boolean inSpeech = false;
-            int silenceGraceFrames = 0;
-            if (useVad) vad.reset();
+            final OnlineStream recStream = stream;
+            VadSegmenter segmenter = !useVad ? null : new VadSegmenter(vad,
+                new VadSegmenter.Sink() {
+                    @Override
+                    public void onAudio(float[] window) {
+                        recStream.acceptWaveform(window, SAMPLE_RATE);
+                    }
+
+                    @Override
+                    public void onUtteranceEnd() {
+                        // Utterance boundaries are handled by the recognizer's
+                        // own endpoint detection in the read loop.
+                    }
+                });
 
             while (listening.get() && source.isActive()
                     && (System.currentTimeMillis() - startTime) < maxMs) {
@@ -1065,52 +1313,7 @@ public class SpeechEngine {
                     // No VAD — feed everything directly (fallback)
                     stream.acceptWaveform(chunk, SAMPLE_RATE);
                 } else {
-                    // Accumulate into 512-sample windows for VAD
-                    int pos = 0;
-                    while (pos < chunk.length) {
-                        int toCopy = Math.min(chunk.length - pos, vadWindow - vadBufPos);
-                        System.arraycopy(chunk, pos, vadBuf, vadBufPos, toCopy);
-                        vadBufPos += toCopy;
-                        pos += toCopy;
-
-                        if (vadBufPos == vadWindow) {
-                            vad.acceptWaveform(vadBuf);
-                            if (vad.isSpeechDetected()) {
-                                if (!inSpeech) {
-                                    // Silence → speech transition: flush pre-roll so
-                                    // the recognizer sees the word attack, not just the
-                                    // already-established vowel.
-                                    for (int i = 0; i < preRollFrames; i++) {
-                                        int idx = (preRollPos + i) % preRollFrames;
-                                        if (preRoll[idx] != null) {
-                                            stream.acceptWaveform(preRoll[idx], SAMPLE_RATE);
-                                        }
-                                    }
-                                    inSpeech = true;
-                                }
-                                vadSpeechFrames++;
-                                stream.acceptWaveform(vadBuf.clone(), SAMPLE_RATE);
-                                silenceGraceFrames = 0;
-                            } else {
-                                // Silence frame
-                                if (inSpeech && silenceGraceFrames < silenceGraceThreshold) {
-                                    // Trailing grace period — keep forwarding so we
-                                    // don't clip trailing consonants or short pauses.
-                                    stream.acceptWaveform(vadBuf.clone(), SAMPLE_RATE);
-                                    silenceGraceFrames++;
-                                } else {
-                                    inSpeech = false;
-                                }
-                                // Always update the pre-roll ring buffer with this
-                                // silence frame so we have lookback for the next
-                                // speech onset.
-                                preRoll[preRollPos] = vadBuf.clone();
-                                preRollPos = (preRollPos + 1) % preRollFrames;
-                                vadSilenceFrames++;
-                            }
-                            vadBufPos = 0;
-                        }
-                    }
+                    segmenter.accept(chunk);
                 }
 
                 while (recognizer.isReady(stream)) {
@@ -1136,32 +1339,25 @@ public class SpeechEngine {
                     if (!text.isEmpty()) {
                         if (allText.length() > 0) allText.append(" ");
                         allText.append(text);
+                        utteranceEndTs = System.currentTimeMillis();
+                        if (stopAtEndpoint) {
+                            recognizer.reset(stream);
+                            break;
+                        }
                     }
                     recognizer.reset(stream);
                 }
             }
 
             if (useVad) {
-                Log.i(TAG, "VAD stats: speech=" + vadSpeechFrames
-                    + " silence=" + vadSilenceFrames
-                    + " ratio=" + (vadSpeechFrames > 0 ?
-                        String.format("%.1f%%", 100.0 * vadSpeechFrames / (vadSpeechFrames + vadSilenceFrames)) : "N/A"));
-            }
-
-            // Flush any remaining partial VAD buffer.
-            // If we were in speech (or grace period), forward the partial window
-            // even if it's technically silence — it's part of the trailing edge
-            // of the last utterance.
-            if (useVad && vadBufPos > 0) {
-                // Pad with zeros to fill the window
-                for (int i = vadBufPos; i < vadWindow; i++) vadBuf[i] = 0;
-                vad.acceptWaveform(vadBuf);
-                if (vad.isSpeechDetected() || inSpeech) {
-                    vadSpeechFrames++;
-                    stream.acceptWaveform(vadBuf, SAMPLE_RATE);
-                } else {
-                    vadSilenceFrames++;
-                }
+                // Flush any remaining partial VAD window (trailing edge of
+                // the last utterance).
+                segmenter.flush();
+                Log.i(TAG, "VAD stats: speech=" + segmenter.getSpeechWindows()
+                    + " silence=" + segmenter.getSilenceWindows()
+                    + " ratio=" + (segmenter.getSpeechWindows() > 0 ?
+                        String.format("%.1f%%", 100.0 * segmenter.getSpeechWindows()
+                            / (segmenter.getSpeechWindows() + segmenter.getSilenceWindows())) : "N/A"));
             }
 
             stream.inputFinished();
@@ -1173,6 +1369,7 @@ public class SpeechEngine {
             if (!tailText.isEmpty()) {
                 if (allText.length() > 0) allText.append(" ");
                 allText.append(tailText);
+                utteranceEndTs = System.currentTimeMillis();
             }
 
             String finalText = allText.toString().trim();
@@ -1182,13 +1379,14 @@ public class SpeechEngine {
             long elapsed = System.currentTimeMillis() - startTime;
 
             String vadInfo = useVad ?
-                ",\"vad_speech\":" + vadSpeechFrames
-                + ",\"vad_silence\":" + vadSilenceFrames : "";
+                ",\"vad_speech\":" + segmenter.getSpeechWindows()
+                + ",\"vad_silence\":" + segmenter.getSilenceWindows() : "";
 
             return "{\"text\":\"" + escJson(punctuated)
                 + "\",\"source\":\"ble\""
                 + ",\"duration\":" + String.format("%.1f", elapsed / 1000.0)
                 + ",\"elapsed_ms\":" + elapsed
+                + ",\"utterance_end_ts\":" + utteranceEndTs
                 + vadInfo + "}";
         } catch (Exception e) {
             Log.e(TAG, "External audio stream listen failed", e);
@@ -1196,6 +1394,7 @@ public class SpeechEngine {
         } finally {
             listening.set(false);
             if (stream != null) stream.release();
+            releaseListenLock();
         }
     }
 
@@ -1236,72 +1435,57 @@ public class SpeechEngine {
         long startTime = System.currentTimeMillis();
         long maxMs = maxDurationSec * 1000L;
 
-        // Take over pre-record mic if available
+        // Take over pre-record mic if available (claim transfers with it)
         float[][] lookbackHolder = new float[1][];
-        AudioRecord mic = takePreRecordMic(lookbackHolder);
+        AudioRecord mic = takePreRecordMic(lookbackHolder, "remote_listen");
         float[] lookback = lookbackHolder[0];
+        boolean micClaimed = (mic != null);
 
+        acquireListenLock();
         try {
             if (mic == null) {
-                int bufSize = Math.max(
-                    AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
-                        AudioFormat.ENCODING_PCM_16BIT),
-                    SAMPLE_RATE * 2);
-                mic = new AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE,
-                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize);
-                if (mic.getState() != AudioRecord.STATE_INITIALIZED) {
-                    mic.release();
-                    return "{\"error\":\"mic not available\"}";
-                }
+                String busy = claimMic("remote_listen");
+                if (busy != null) return "{\"error\":\"mic busy (" + busy + ")\"}";
+                micClaimed = true;
+                mic = openMic();
+                if (mic == null) return "{\"error\":\"mic not available\"}";
                 mic.startRecording();
             }
 
-            vad.reset();
-
-            // Accumulate audio samples for current utterance
-            // Pre-allocate for up to 30s of audio (will grow if needed)
-            float[] utteranceBuf = new float[SAMPLE_RATE * 30];
-            int utteranceLen = 0;
-            boolean inSpeech = false;
-            int chunkIndex = 0;
-            int vadWindow = 512;
-            float[] vadBuf = new float[vadWindow];
-            int vadBufPos = 0;
-
-            // Feed lookback audio through VAD first
-            if (lookback != null && lookback.length > 0) {
-                int pos = 0;
-                while (pos < lookback.length) {
-                    int toCopy = Math.min(lookback.length - pos, vadWindow - vadBufPos);
-                    System.arraycopy(lookback, pos, vadBuf, vadBufPos, toCopy);
-                    vadBufPos += toCopy;
-                    pos += toCopy;
-                    if (vadBufPos == vadWindow) {
-                        vad.acceptWaveform(vadBuf);
-                        if (vad.isSpeechDetected()) {
-                            inSpeech = true;
-                            if (utteranceLen + vadWindow > utteranceBuf.length) {
-                                utteranceBuf = Arrays.copyOf(utteranceBuf, utteranceBuf.length * 2);
-                            }
-                            System.arraycopy(vadBuf, 0, utteranceBuf, utteranceLen, vadWindow);
-                            utteranceLen += vadWindow;
-                        } else if (inSpeech) {
-                            // Silence after speech — emit chunk
-                            if (utteranceLen > SAMPLE_RATE / 4) { // min 250ms
-                                byte[] wav = samplesToWav(utteranceBuf, utteranceLen);
-                                if (callback != null) {
-                                    callback.onChunk(wav, chunkIndex,
-                                        (float) utteranceLen / SAMPLE_RATE);
-                                }
-                                chunkIndex++;
-                            }
-                            utteranceLen = 0;
-                            inSpeech = false;
-                            vad.reset();
-                        }
-                        vadBufPos = 0;
+            // Utterance segmentation (pre-roll + hysteresis) via VadSegmenter.
+            // The old inline version here had neither, so chunks sent to the
+            // remote ASR node clipped word onsets (VOICE_REVIEW.md #5).
+            final AudioChunkCallback chunkCb = callback;
+            final float[][] bufHolder = { new float[SAMPLE_RATE * 30] };
+            final int[] lenHolder = { 0 };
+            final int[] chunkHolder = { 0 };
+            VadSegmenter segmenter = new VadSegmenter(vad, new VadSegmenter.Sink() {
+                @Override
+                public void onAudio(float[] window) {
+                    if (lenHolder[0] + window.length > bufHolder[0].length) {
+                        bufHolder[0] = Arrays.copyOf(bufHolder[0], bufHolder[0].length * 2);
                     }
+                    System.arraycopy(window, 0, bufHolder[0], lenHolder[0], window.length);
+                    lenHolder[0] += window.length;
                 }
+
+                @Override
+                public void onUtteranceEnd() {
+                    if (lenHolder[0] > SAMPLE_RATE / 4) { // min 250ms
+                        byte[] wav = samplesToWav(bufHolder[0], lenHolder[0]);
+                        if (chunkCb != null) {
+                            chunkCb.onChunk(wav, chunkHolder[0],
+                                (float) lenHolder[0] / SAMPLE_RATE);
+                        }
+                        chunkHolder[0]++;
+                    }
+                    lenHolder[0] = 0;
+                }
+            });
+
+            // Feed lookback audio (captured by pre_listen) first
+            if (lookback != null && lookback.length > 0) {
+                segmenter.accept(lookback);
             }
 
             short[] rawBuf = new short[SAMPLE_RATE / 10]; // 100ms reads
@@ -1314,58 +1498,18 @@ public class SpeechEngine {
                 for (int i = 0; i < read; i++) {
                     floatBuf[i] = rawBuf[i] / 32768.0f;
                 }
-
-                int pos = 0;
-                while (pos < read) {
-                    int toCopy = Math.min(read - pos, vadWindow - vadBufPos);
-                    System.arraycopy(floatBuf, pos, vadBuf, vadBufPos, toCopy);
-                    vadBufPos += toCopy;
-                    pos += toCopy;
-
-                    if (vadBufPos == vadWindow) {
-                        vad.acceptWaveform(vadBuf);
-                        if (vad.isSpeechDetected()) {
-                            inSpeech = true;
-                            if (utteranceLen + vadWindow > utteranceBuf.length) {
-                                utteranceBuf = Arrays.copyOf(utteranceBuf, utteranceBuf.length * 2);
-                            }
-                            System.arraycopy(vadBuf, 0, utteranceBuf, utteranceLen, vadWindow);
-                            utteranceLen += vadWindow;
-                        } else if (inSpeech) {
-                            // Silence after speech — emit this utterance
-                            if (utteranceLen > SAMPLE_RATE / 4) { // min 250ms
-                                byte[] wav = samplesToWav(utteranceBuf, utteranceLen);
-                                if (callback != null) {
-                                    callback.onChunk(wav, chunkIndex,
-                                        (float) utteranceLen / SAMPLE_RATE);
-                                }
-                                chunkIndex++;
-                            }
-                            utteranceLen = 0;
-                            inSpeech = false;
-                            vad.reset();
-                        }
-                        vadBufPos = 0;
-                    }
-                }
+                segmenter.accept(floatBuf, read);
             }
 
-            // Flush remaining audio if we were mid-speech
-            if (utteranceLen > SAMPLE_RATE / 4) {
-                byte[] wav = samplesToWav(utteranceBuf, utteranceLen);
-                if (callback != null) {
-                    callback.onChunk(wav, chunkIndex,
-                        (float) utteranceLen / SAMPLE_RATE);
-                }
-                chunkIndex++;
-            }
+            // Flush the trailing partial window / mid-speech utterance
+            segmenter.flush();
 
             long elapsed = System.currentTimeMillis() - startTime;
             if (callback != null) {
-                callback.onDone(chunkIndex, elapsed);
+                callback.onDone(chunkHolder[0], elapsed);
             }
 
-            return "{\"status\":\"ok\",\"chunks\":" + chunkIndex
+            return "{\"status\":\"ok\",\"chunks\":" + chunkHolder[0]
                 + ",\"elapsed_ms\":" + elapsed + "}";
         } catch (Exception e) {
             Log.e(TAG, "Remote stream listen failed", e);
@@ -1376,6 +1520,8 @@ public class SpeechEngine {
                 try { mic.stop(); } catch (Exception ignored) {}
                 mic.release();
             }
+            if (micClaimed) releaseMic("remote_listen");
+            releaseListenLock();
         }
     }
 

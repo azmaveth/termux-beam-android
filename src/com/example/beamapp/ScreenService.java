@@ -19,6 +19,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.concurrent.CountDownLatch;
@@ -34,6 +35,7 @@ public class ScreenService extends AccessibilityService {
     private static final String TAG = "ScreenService";
     private static final int DEFAULT_MAX_DEPTH = 10;
     private static final int PORT = 9878;
+    private static final String LOOPBACK_HOST = "127.0.0.1";
 
     private ServerSocket serverSocket;
     private volatile boolean running = false;
@@ -68,8 +70,9 @@ public class ScreenService extends AccessibilityService {
         running = true;
         new Thread(() -> {
             try {
-                serverSocket = new ServerSocket(PORT);
-                Log.i(TAG, "Listening on port " + PORT);
+                serverSocket = new ServerSocket(
+                    PORT, 50, InetAddress.getByName(LOOPBACK_HOST));
+                Log.i(TAG, "Listening on " + LOOPBACK_HOST + ":" + PORT);
                 while (running) {
                     try {
                         Socket client = serverSocket.accept();

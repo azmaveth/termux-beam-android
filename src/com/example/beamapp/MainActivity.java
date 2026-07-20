@@ -170,6 +170,13 @@ public class MainActivity extends Activity {
                             BufferedReader in = new BufferedReader(
                                 new InputStreamReader(sock.getInputStream()));
 
+                            String tok = bridgeToken();
+                            if (tok != null) {
+                                out.write(("auth " + tok + "\n").getBytes());
+                                out.flush();
+                                in.read(new char[64]);
+                            }
+
                             out.write(msg.getBytes());
                             out.flush();
 
@@ -358,6 +365,7 @@ public class MainActivity extends Activity {
                     OutputStream os = sock.getOutputStream();
                     BufferedReader reader = new BufferedReader(
                         new InputStreamReader(sock.getInputStream()));
+                    authBridge(os, reader);
 
                     // Start recording indefinitely (until mic_stop)
                     String recReq = "{\"id\":100,\"cmd\":\"mic_record\",\"args\":\"stream\"}";
@@ -458,6 +466,30 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    /** Read the bridge auth token (app-private file), or null. */
+    private String bridgeToken() {
+        try {
+            if (new java.io.File(getFilesDir(), "bridge_auth_disabled").exists()) return null;
+            java.io.File f = new java.io.File(getFilesDir(), "bridge_token");
+            if (!f.exists()) return null;
+            BufferedReader br = new BufferedReader(new java.io.FileReader(f));
+            String tok = br.readLine();
+            br.close();
+            return tok != null ? tok.trim() : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Authenticate a freshly opened bridge socket (consumes the reply). */
+    private void authBridge(OutputStream os, BufferedReader reader) throws Exception {
+        String tok = bridgeToken();
+        if (tok == null) return;
+        os.write(("{\"id\":0,\"cmd\":\"auth\",\"args\":\"" + escJson(tok) + "\"}\n").getBytes());
+        os.flush();
+        reader.readLine();
+    }
+
     /** Extract a string value from a JSON response */
     private static String extractJsonString(String json, String key) {
         if (json == null) return null;
@@ -491,6 +523,7 @@ public class MainActivity extends Activity {
                     OutputStream os = sock.getOutputStream();
                     BufferedReader reader = new BufferedReader(
                         new InputStreamReader(sock.getInputStream()));
+                    authBridge(os, reader);
 
                     // Send pre_listen first to start mic immediately, then stream_listen
                     String preReq = "{\"id\":98,\"cmd\":\"pre_listen\",\"args\":\"\"}";
@@ -576,14 +609,25 @@ public class MainActivity extends Activity {
         listenButton.setText(R.string.start_listen);
         partialLogStart = -1;
         if (!isRemoteAsrMode()) {
-            // Local mode: close socket to interrupt stream_listen
-            Socket sock = listenSocket;
-            if (sock != null) {
-                try {
-                    sock.close();
-                } catch (Exception e) { /* ignore */ }
-            }
-            appendLog("[Stopped listening]\n");
+            // Local mode: ask the engine to stop. The in-flight stream_listen
+            // then returns its final result promptly on the listen socket
+            // (closing the socket used to leave the engine recording until
+            // maxDuration with no way to reach it).
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try (Socket s = new Socket("127.0.0.1", 9877)) {
+                        OutputStream os = s.getOutputStream();
+                        BufferedReader br = new BufferedReader(
+                            new InputStreamReader(s.getInputStream()));
+                        authBridge(os, br);
+                        os.write("{\"id\":103,\"cmd\":\"stop_listen\",\"args\":\"\"}\n".getBytes());
+                        os.flush();
+                        br.readLine();
+                    } catch (Exception e) { /* ignore */ }
+                }
+            }, "stop-listen").start();
+            appendLog("[Stopping...]\n");
         }
         // Remote mode: the recording thread detects isListening=false,
         // stops mic, and sends to GPU for transcription

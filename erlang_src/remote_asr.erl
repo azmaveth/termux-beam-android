@@ -10,14 +10,15 @@
 -module(remote_asr).
 -export([listen/0, listen/1, listen/2, stop/0]).
 
--define(ASR_NODE, 'arbor_gpu2@10.42.42.97').
 -define(RPC_TIMEOUT, 30000).
 
-%% @doc Listen for up to 30 seconds, transcribe on default GPU node.
+%% @doc Listen for up to 30 seconds, transcribe on the configured GPU node.
 listen() -> listen(30).
 
-%% @doc Listen for up to MaxSec seconds.
-listen(MaxSec) -> listen(MaxSec, ?ASR_NODE).
+%% @doc Listen for up to MaxSec seconds. The node comes from speech config
+%% (/sdcard/.beam-config remote_asr_node=... or application env) instead of
+%% a second hardcoded default.
+listen(MaxSec) -> listen(MaxSec, speech:remote_asr_node()).
 
 %% @doc Listen for up to MaxSec seconds, transcribe on Node.
 listen(MaxSec, Node) ->
@@ -28,6 +29,8 @@ listen(MaxSec, Node) ->
                          [binary, {active, false}, {packet, line},
                           {buffer, 1048576}, {recbuf, 1048576}], 2000) of
         {ok, Sock} ->
+            %% Authenticate first (consumes the auth reply line)
+            send_auth(Sock),
             %% Send remote_listen command
             Id = erlang:unique_integer([positive]) rem 100000,
             Cmd = iolist_to_binary([
@@ -50,6 +53,23 @@ stop() ->
     android:call(<<"stop_listen">>, <<>>, 1000).
 
 %%% Internal
+
+%% Bridge auth: send the app-private token and consume the reply line so
+%% the chunk protocol starts clean. No token file → send nothing (only
+%% works when the server has auth disabled too).
+send_auth(Sock) ->
+    case file:read_file("/data/data/com.example.beamapp/files/bridge_token") of
+        {ok, Tok0} ->
+            Tok = string:trim(Tok0),
+            Line = <<"{\"id\":0,\"cmd\":\"auth\",\"args\":\"", Tok/binary, "\"}\n">>,
+            ok = gen_tcp:send(Sock, Line),
+            case gen_tcp:recv(Sock, 0, 5000) of
+                {ok, _AuthReply} -> ok;
+                {error, _} -> ok
+            end;
+        {error, _} ->
+            ok
+    end.
 
 recv_loop(Sock, Id, Node, Texts, ChunkCount) ->
     %% Large timeout: VAD may have long silences

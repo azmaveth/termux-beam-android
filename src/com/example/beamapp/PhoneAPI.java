@@ -982,11 +982,13 @@ public class PhoneAPI {
             "{\"cmd\":\"camera_photo\",\"args\":\"<cam_id> <path>\",\"desc\":\"Take a photo\"}," +
             "{\"cmd\":\"torch\",\"args\":\"<on|off>\",\"desc\":\"Toggle flashlight\"}," +
             // Audio & Speech
-            "{\"cmd\":\"tts\",\"args\":\"<text> or <sid> <speed> <text>\",\"desc\":\"Text-to-speech (8 voices)\"}," +
+            "{\"cmd\":\"tts\",\"args\":\"<text> or <sid> <speed> <text>\",\"desc\":\"Text-to-speech (8 voices, streamed playback)\"}," +
+            "{\"cmd\":\"tts_stop\",\"desc\":\"Cancel in-progress TTS playback\"}," +
             "{\"cmd\":\"tts_voices\",\"desc\":\"Number of TTS voices\"}," +
             "{\"cmd\":\"stt\",\"args\":\"<wav_path>\",\"desc\":\"Transcribe WAV file\"}," +
             "{\"cmd\":\"listen\",\"args\":\"<seconds>\",\"desc\":\"Listen via phone mic (STT)\"}," +
-            "{\"cmd\":\"stream_listen\",\"args\":\"<seconds>\",\"desc\":\"Streaming STT with partials\"}," +
+            "{\"cmd\":\"stream_listen\",\"args\":\"<seconds> [once]\",\"desc\":\"Streaming STT with partials; once = return at first utterance\"}," +
+            "{\"cmd\":\"stop_listen\",\"desc\":\"Stop any in-progress listen\"}," +
             "{\"cmd\":\"pre_listen\",\"desc\":\"Start pre-recording for faster listen\"}," +
             "{\"cmd\":\"transcribe_offline\",\"args\":\"<wav_path>\",\"desc\":\"Offline STT (SenseVoice)\"}," +
             "{\"cmd\":\"diarize\",\"args\":\"<wav_path>\",\"desc\":\"Speaker diarization + transcription\"}," +
@@ -1002,8 +1004,14 @@ public class PhoneAPI {
             // BLE Earbuds
             "{\"cmd\":\"buddie_connect\",\"args\":\"<ble_addr>\",\"desc\":\"Connect Buddie earbuds\"}," +
             "{\"cmd\":\"buddie_disconnect\",\"desc\":\"Disconnect earbuds\"}," +
-            "{\"cmd\":\"buddie_listen\",\"args\":\"<seconds>\",\"desc\":\"STT via earbuds with VAD\"}," +
+            "{\"cmd\":\"buddie_listen\",\"args\":\"<seconds> [once]\",\"desc\":\"STT via earbuds with VAD; once = return at first utterance\"}," +
             "{\"cmd\":\"buddie_status\",\"desc\":\"Earbud connection status\"}," +
+            "{\"cmd\":\"buddie_mix\",\"args\":\"<on|off>\",\"desc\":\"Mix earbud speaker audio into STT (default off)\"}," +
+            // Speaker identification
+            "{\"cmd\":\"speaker_enroll\",\"args\":\"<name> [wav_path]\",\"desc\":\"Enroll speaker take (records 5s if no wav; repeat to add takes)\"}," +
+            "{\"cmd\":\"speaker_verify\",\"args\":\"[name] [wav_path] [threshold]\",\"desc\":\"Verify speaker vs enrolled centroids (records 4s if no wav)\"}," +
+            "{\"cmd\":\"speaker_list\",\"desc\":\"List enrolled speakers\"}," +
+            "{\"cmd\":\"speaker_forget\",\"args\":\"<name>\",\"desc\":\"Remove speaker enrollment\"}," +
             // Bluetooth
             "{\"cmd\":\"bt_status\",\"desc\":\"Bluetooth adapter status\"}," +
             "{\"cmd\":\"bt_bonded\",\"desc\":\"List paired BT devices\"}," +
