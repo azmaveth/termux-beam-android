@@ -96,13 +96,19 @@ public class GemmaEngine {
              * litertlm-android-0.10.0: Backend$GPU declares <init>()V and no
              * INSTANCE field, so it is a plain class, not a Kotlin object). */
             boolean useGpu = "gpu".equalsIgnoreCase(backendName);
-            Backend backend = useGpu ? new Backend.GPU() : new Backend.CPU(null);
-            Log.i(TAG, "Backend: " + (useGpu ? "GPU" : "CPU"));
+            Backend textBackend = useGpu ? new Backend.GPU() : new Backend.CPU(null);
+            /* Vision/audio stay on CPU regardless. They are unused for
+             * text-only Gemma, and the model declares a per-modality backend
+             * constraint: passing GPU for audio fails engine creation with
+             * "Audio backend constraint mismatch. Model requires one of [cpu]
+             * but Audio backend is GPU". */
+            Backend auxBackend = new Backend.CPU(null);
+            Log.i(TAG, "Backend: text=" + (useGpu ? "GPU" : "CPU") + " vision/audio=CPU");
             EngineConfig config = new EngineConfig(
                 modelPath,
-                backend,                // text backend
-                backend,                // vision backend (unused for Gemma text)
-                backend,                // audio backend (unused)
+                textBackend,            // text backend — the one that matters
+                auxBackend,             // vision backend (unused for Gemma text)
+                auxBackend,             // audio backend (must be CPU, see above)
                 null,                   // maxNumTokens — library default
                 cacheDir.getAbsolutePath()
             );
