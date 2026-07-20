@@ -29,6 +29,13 @@ fi
 
 if [[ "$MODE" == termux ]]; then
     exec > /data/data/com.termux/files/home/BeamApp/build.log 2>&1
+    # Mirror the log to shared storage on exit, success or failure. Termux's
+    # home is under its own uid, so nothing else on the device — including the
+    # BeamApp itself — can read build.log there. /sdcard is the one filesystem
+    # both uids can see, which makes a failed build diagnosable without having
+    # to hand-copy the log every time.
+    trap 'cp -f /data/data/com.termux/files/home/BeamApp/build.log \
+              /sdcard/beamapp-build.log 2>/dev/null || true' EXIT
     set -x
     export PATH="/data/data/com.termux/files/usr/bin:$PATH"
     PROJECT="/data/data/com.termux/files/home/BeamApp"
