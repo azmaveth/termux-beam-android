@@ -1536,9 +1536,9 @@ public class BridgeServer {
          * driver can be retried on CPU without a rebuild. */
         String raw = unquote(args).trim();
         if (raw.isEmpty()) {
-            return "{\"error\":\"usage: gemma_load <path> [auto|text[,vision[,audio]]]"
-                 + " where each backend is cpu or gpu; auto lets the model"
-                 + " declare its own modalities (needed for text-only models)\"}";
+            return "{\"error\":\"usage: gemma_load <path> [text[,vision[,audio]]]"
+                 + " where each backend is cpu or gpu; omitted slots are"
+                 + " disabled, so a bare backend means text-only\"}";
         }
         /* Backend spec is "text[,vision[,audio]]" — the model's per-modality
          * constraints are not uniform, so all three must be reachable without
@@ -1548,7 +1548,7 @@ public class BridgeServer {
         int sp = raw.lastIndexOf(' ');
         if (sp > 0) {
             String tail = raw.substring(sp + 1).trim();
-            if (tail.matches("(?i)auto|(cpu|gpu)(,(cpu|gpu)){0,2}")) {
+            if (tail.matches("(?i)(cpu|gpu)(,(cpu|gpu)){0,2}")) {
                 backend = tail.toLowerCase(Locale.US);
                 path = raw.substring(0, sp).trim();
             }

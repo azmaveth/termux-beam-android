@@ -111,28 +111,31 @@ public class GemmaEngine {
              * than guess-and-rebuild, the spec is "text[,vision[,audio]]",
              * e.g. "gpu", "gpu,gpu,cpu", "cpu". Unspecified slots inherit the
              * text backend. */
-            String[] parts = backendName.split(",");
-            String textName   = parts.length > 0 ? parts[0].trim() : "cpu";
-            String visionName = parts.length > 1 ? parts[1].trim() : textName;
-            String audioName  = parts.length > 2 ? parts[2].trim() : textName;
-
-            /* "auto": let the model declare its own modalities via the
-             * single-argument constructor.
+            /* Spec is "text[,vision[,audio]]". An OMITTED slot is null, not a
+             * copy of the text backend — null means "this model has no such
+             * modality", which is what a text-only bundle needs. Naming an
+             * audio backend for a text-only model makes the runtime look for
+             * an encoder that isn't there:
+             *   NOT_FOUND: TF_LITE_AUDIO_ENCODER_HW not found in the model.
              *
-             * Naming every backend explicitly forces the runtime to wire up all
-             * three, so a text-only bundle fails at session creation with
-             * "NOT_FOUND: TF_LITE_AUDIO_ENCODER_HW not found in the model" —
-             * we asked for an audio encoder the model doesn't contain. Needed
-             * for Granite and any other text-only model; multimodal Gemma is
-             * happy either way. */
-            if ("auto".equalsIgnoreCase(textName)) {
-                Log.i(TAG, "Backends: auto (model-declared modalities)");
-                initEngine(new EngineConfig(modelPath), modelPath, startMs);
-                return;
-            }
-
+             * Only modelPath and the text backend are @NotNull on
+             * EngineConfig; visionBackend, audioBackend, maxNumTokens,
+             * maxNumImages and cacheDir are all @Nullable (verified against
+             * the 0.14.0 class's parameter annotations). The original code
+             * passed one backend instance to all three slots on the assumption
+             * that they were required — they are not.
+             *
+             * So: "cpu" = text-only on CPU; "cpu,cpu,cpu" = full multimodal;
+             * "gpu,gpu,cpu" = GPU text+vision with the CPU audio the model
+             * demands. */
+            String[] parts = backendName.split(",");
+            String textName = parts.length > 0 && !parts[0].trim().isEmpty()
+                ? parts[0].trim() : "cpu";
+            Backend visionBackend = parts.length > 1 ? backendFor(parts[1].trim()) : null;
+            Backend audioBackend  = parts.length > 2 ? backendFor(parts[2].trim()) : null;
             Log.i(TAG, "Backends: text=" + textName
-                     + " vision=" + visionName + " audio=" + audioName);
+                     + " vision=" + (visionBackend == null ? "none" : parts[1].trim())
+                     + " audio="  + (audioBackend  == null ? "none" : parts[2].trim()));
             /* litertlm 0.14.0 inserted maxNumImages before cacheDir:
              *   (modelPath, backend, visionBackend, audioBackend,
              *    maxNumTokens, maxNumImages, cacheDir)
@@ -143,9 +146,9 @@ public class GemmaEngine {
              * null takes the model/engine default. */
             EngineConfig config = new EngineConfig(
                 modelPath,
-                backendFor(textName),
-                backendFor(visionName),
-                backendFor(audioName),
+                backendFor(textName),   // @NotNull — the only required backend
+                visionBackend,          // null = model has/needs no vision
+                audioBackend,           // null = model has/needs no audio
                 null,                   // maxNumTokens — library default
                 null,                   // maxNumImages — model/engine default
                 cacheDir.getAbsolutePath()
