@@ -59,6 +59,20 @@ public class GemmaEngine {
      * @throws RuntimeException if engine initialization fails
      */
     public void load(String modelPath) {
+        load(modelPath, "cpu");
+    }
+
+    /**
+     * Load a model on a named backend: "cpu" (default) or "gpu".
+     *
+     * Worth trying GPU: on the reference Android device the vendor benchmarks
+     * put GPU at 0.3 s time-to-first-token and 676 MB, versus 1.8 s and
+     * 1733 MB on CPU. The memory drop matters as much as the speed on a
+     * memory-constrained handset. GPU availability depends on the SoC's
+     * driver, so this stays selectable at call time rather than hardcoded —
+     * if GPU init fails, the caller can retry with "cpu" without a rebuild.
+     */
+    public void load(String modelPath, String backendName) {
         synchronized (lock) {
             File f = new File(modelPath);
             if (!f.exists() || !f.canRead()) {
@@ -75,15 +89,18 @@ public class GemmaEngine {
             Log.i(TAG, "Loading model: " + modelPath);
             long startMs = System.currentTimeMillis();
 
-            /* Text-only on CPU with default thread count. Vision/audio backends
-             * must still be non-null — pass the same CPU instance. We leave
-             * maxNumTokens as null to use the runtime default. */
-            Backend cpu = new Backend.CPU(null);
+            /* Text-only. Vision/audio backends must still be non-null — pass
+             * the same instance. maxNumTokens null = runtime default.
+             * Backend.CPU takes an Integer thread count (null = default);
+             * Backend.GPU is a Kotlin object, so it's referenced as INSTANCE. */
+            boolean useGpu = "gpu".equalsIgnoreCase(backendName);
+            Backend backend = useGpu ? Backend.GPU.INSTANCE : new Backend.CPU(null);
+            Log.i(TAG, "Backend: " + (useGpu ? "GPU" : "CPU"));
             EngineConfig config = new EngineConfig(
                 modelPath,
-                cpu,                    // text backend
-                cpu,                    // vision backend (unused for Gemma text)
-                cpu,                    // audio backend (unused)
+                backend,                // text backend
+                backend,                // vision backend (unused for Gemma text)
+                backend,                // audio backend (unused)
                 null,                   // maxNumTokens — library default
                 cacheDir.getAbsolutePath()
             );

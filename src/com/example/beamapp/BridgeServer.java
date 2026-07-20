@@ -1531,17 +1531,33 @@ public class BridgeServer {
      * Blocking — initialization can take several seconds.
      */
     private String cmdGemmaLoad(String args) {
-        String path = unquote(args).trim();
-        if (path.isEmpty()) {
-            return "{\"error\":\"usage: gemma_load <path>\"}";
+        /* "<path>" or "<path> <cpu|gpu>". Backend is selectable at call time so
+         * CPU/GPU can be compared, and so a GPU init failure on an unsupported
+         * driver can be retried on CPU without a rebuild. */
+        String raw = unquote(args).trim();
+        if (raw.isEmpty()) {
+            return "{\"error\":\"usage: gemma_load <path> [cpu|gpu]\"}";
+        }
+        String path = raw;
+        String backend = "cpu";
+        int sp = raw.lastIndexOf(' ');
+        if (sp > 0) {
+            String tail = raw.substring(sp + 1).trim();
+            if ("cpu".equalsIgnoreCase(tail) || "gpu".equalsIgnoreCase(tail)) {
+                backend = tail.toLowerCase(Locale.US);
+                path = raw.substring(0, sp).trim();
+            }
         }
         try {
-            gemmaEngine.load(path);
+            long t0 = System.currentTimeMillis();
+            gemmaEngine.load(path, backend);
             GemmaEngine.Status s = gemmaEngine.status();
-            return "{\"loaded\":true,\"model_path\":\""
-                + escJson(s.modelPath) + "\",\"loaded_at\":" + s.loadedAt + "}";
+            return "{\"loaded\":true,\"backend\":\"" + backend + "\",\"model_path\":\""
+                + escJson(s.modelPath) + "\",\"load_ms\":" + (System.currentTimeMillis() - t0)
+                + ",\"loaded_at\":" + s.loadedAt + "}";
         } catch (Throwable t) {
-            return "{\"error\":\"" + escJson(t.getMessage()) + "\"}";
+            return "{\"error\":\"" + escJson(String.valueOf(t.getMessage()))
+                + "\",\"backend\":\"" + backend + "\"}";
         }
     }
 
