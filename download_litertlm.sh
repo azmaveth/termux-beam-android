@@ -19,7 +19,11 @@ PROJECT="/data/data/com.termux/files/home/BeamApp"
 STAGE="$PROJECT/build/litertlm"
 CLASSPATH_DIR="$STAGE/classpath"
 NATIVE_LIB_DIR="$PROJECT/build/lib/arm64-v8a"
-WORK_DIR="${WORK_DIR:-/tmp/litertlm_fetch}"
+# Scratch space for downloaded artifacts. NOT /tmp: this script runs in Termux,
+# where /tmp does not exist and is not creatable — Termux points $TMPDIR at
+# $PREFIX/tmp instead. Fall back to the project's own build dir, which is
+# guaranteed to exist and be writable, rather than a path outside the sandbox.
+WORK_DIR="${WORK_DIR:-${TMPDIR:-$PROJECT/build}/litertlm_fetch}"
 
 GOOGLE_MAVEN="https://dl.google.com/dl/android/maven2"
 CENTRAL="https://repo1.maven.org/maven2"
