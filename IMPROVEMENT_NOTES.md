@@ -193,6 +193,39 @@ correctly, and there it produces mostly-right output with only the first word
 wrong (`"Baltimore is very cold today"` → `"Ore is very cold to day"`), which
 is a far smaller problem than a broken model.
 
+### New — Termux builds never recompiled erlang_src (FIXED)
+
+`build.sh`'s erlc step lived inside the **host-only** `else` branch of the mode
+switch (`if [[ "$MODE" == termux ]] … else … <erlc here> … fi`). An on-device
+Termux build therefore packaged whatever `.beam` files were already sitting in
+`assets/`, and never compiled `erlang_src/*.erl` at all.
+
+This is worse than it sounds because **`assets/` is gitignored**. Compiled
+beams are not version-controlled, so the build-time erlc step is the *only*
+path by which an `erlang_src` edit can reach the device. On a phone-side build
+that path did not exist — meaning no edit to `android.erl`, `speech.erl`,
+`reconnect.erl` etc. has ever reached the device via a Termux build.
+
+Failure mode was completely silent: no error, no warning, and termux mode
+redirects stdout to `build.log`, so nothing appeared on the terminal either.
+Caught only because the reconnect fix was built, installed, and the running
+node still showed old behaviour — with correctly re-extracted beams that
+happened to contain old code.
+
+Fixed by moving the block out of the branch so it runs in both modes, plus an
+explicit "Erlang bridge modules recompiled into …" line so success is
+greppable in `build.log` instead of being inferred from absence.
+
+Note the ERTS-major check only ever *warned* — the `fi` closes before `erlc`
+runs — so a version mismatch never gated compilation and was never the reason
+edits went missing.
+
+**Open question flagged during this:** `assets/erlang/erts_version` reads
+`16.3.1` (ERTS 16 = OTP 28) and the app UI reports Erlang 28, but
+`erlang:system_info(otp_release)` on the running phone node returned `"29"`.
+Worth reconciling — if the runtime was upgraded without `erts_version` being
+regenerated, build.sh's mismatch check is comparing against a stale value.
+
 ### New — mic is opened two different ways, and AEC hides the phone's own TTS
 
 `openMic()` (used by `stream_listen`, `pre_listen`, `speaker_*`) attaches
