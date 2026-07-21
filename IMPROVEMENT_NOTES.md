@@ -101,23 +101,46 @@ GLES blob:
 
 MediaTek simply never created the `libOpenCL.so` name that
 `dlopen("libOpenCL.so")` resolves. So this is an exposure problem, not a
-driver-authoring problem. Options, cheapest first:
+driver-authoring problem — but **exposing it from an app is not possible**, as
+a `System.load()` of the blob proved:
 
-1. **Ship a copy of the blob in the APK as `libOpenCL.so`** (jniLibs/arm64-v8a),
-   so it lands in the app's `nativeLibraryDir`, which *is* on the app's dlopen
-   search path. No root. Risks: +42 MB APK, and the blob's DT_NEEDED vendor
-   dependencies may not resolve inside the app's linker namespace.
-2. **`System.load()` the absolute vendor path early**, before LiteRT probes.
-   Only helps if LiteRT resolves via `dlsym(RTLD_DEFAULT, …)` rather than its
-   own `dlopen` handle — worth one experiment.
-3. **Root / Magisk**: symlink `/vendor/lib64/libOpenCL.so`. Cleanest if root
-   is acceptable; /vendor is read-only otherwise.
-4. Do **not** write an OpenCL driver. The implementation exists; and a
-   from-scratch stack is Mesa/rusticl territory.
+```
+dlopen failed: library "/system/vendor/lib64/egl/libGLES_mali.so"
+  needed or dlopened by "/apex/com.android.art/lib64/libnativeloader.so"
+  is not accessible for the namespace "clns-9"
 
-Temper expectations: the vendor's 6x GPU speedup is measured on flagship
-Adreno/Apple silicon. A mid-range Mali G57 may deliver much less, and kernel
-compilation costs 19-74 s per load. Worth trying, not worth assuming.
+tflite: Failed to load OpenCL library with dlopen:
+        library "libvndksupport.so" not found. Trying ICD loader.
+```
+
+Apps run in a restricted linker namespace. Vendor blobs reach the vendor
+namespace via `libvndksupport.so`, which apps do not get. That also rules out
+shipping a copy named `libOpenCL.so` in `jniLibs`: it would satisfy the *name*
+lookup but not the blob's vendor dependencies.
+
+**And the runtime deliberately limits Mali anyway.** LiteRT falls back to
+WebGPU-on-Vulkan and does select the GPU:
+
+```
+litert: OpenCL not supported on this platform. Using WebGPU instead.
+native: Selected adapter: Mali-G57 MC2, arch=valhall, vendor=arm,
+        backend=Vulkan, adapterType=Integrated GPU
+native: Weights preparation on Gpu is disabled for PowerVR, Broadcom,
+        Mali GPUs and non-OpenCL/WebGPU/Metal backends.
+```
+
+so the hardware is reachable, but weight preparation is disabled for Mali by
+design, and generation still hard-fails on the missing OpenCL. Conclusion:
+**GPU LLM inference is not practical on this SoC through LiteRT-LM**, for two
+independent reasons — namespace isolation and first-class-support gaps — not
+because the GPU is incapable.
+
+Do **not** write an OpenCL driver: the implementation already exists on the
+device, a from-scratch stack is Mesa/rusticl territory, and even a working one
+would still hit the disabled Mali weight-prep path. The only remaining route
+is root/Magisk (symlink plus `ld.config.txt` namespace edits), for an
+uncertain payoff — the vendor's 6x GPU figures come from flagship
+Adreno/Apple silicon, and kernel compilation alone costs 19-74 s per load.
 
 ### Recommendation
 
