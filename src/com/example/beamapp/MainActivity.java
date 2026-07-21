@@ -349,7 +349,7 @@ public class MainActivity extends Activity {
     /** Check .beam-config for asr_mode=remote */
     private boolean isRemoteAsrMode() {
         try {
-            java.io.File f = new java.io.File("/sdcard/.beam-config");
+            java.io.File f = BeamService.resolveConfigFile(this);
             if (!f.exists()) return false;
             BufferedReader br = new BufferedReader(new java.io.FileReader(f));
             String line;

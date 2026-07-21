@@ -5,6 +5,7 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
 import android.content.res.AssetManager;
 import android.os.Binder;
@@ -31,7 +32,27 @@ public class BeamService extends Service {
     private static final String CHANNEL_ID = "beam_service_channel";
     private static final int NOTIFICATION_ID = 1;
 
-    private static final String CONFIG_PATH = "/sdcard/.beam-config";
+    static final String CONFIG_PATH = "/sdcard/.beam-config";
+
+    /**
+     * The config file that is actually in effect.
+     *
+     * Shared storage is preferred so the file stays editable from Termux or a
+     * file manager, but /sdcard requires MANAGE_EXTERNAL_STORAGE ("All files
+     * access") — a special permission the user must grant by hand; declaring it
+     * in the manifest is not sufficient. Where it has not been granted we fall
+     * back to an app-private copy, which always works.
+     *
+     * Everything that reads or writes config must go through this, or the
+     * editor UI ends up editing a file the service never reads.
+     */
+    static File resolveConfigFile(Context ctx) {
+        File shared = new File(CONFIG_PATH);
+        if (shared.exists() && shared.canRead()) return shared;
+        File priv = new File(ctx.getFilesDir(), "beam-config");
+        if (priv.exists()) return priv;
+        return shared;   // nothing exists yet — shared is the preferred target
+    }
 
     private final IBinder binder = new LocalBinder();
     private Handler handler;
@@ -665,8 +686,9 @@ public class BeamService extends Service {
         config.put("cluster_nodes", "");
         config.put("distributed", "true");
 
-        File configFile = new File(CONFIG_PATH);
+        File configFile = resolveConfigFile(this);
         if (configFile.exists()) {
+            Log.i(TAG, "Config: " + configFile);
             try (BufferedReader br = new BufferedReader(new FileReader(configFile))) {
                 String line;
                 while ((line = br.readLine()) != null) {
@@ -682,23 +704,42 @@ public class BeamService extends Service {
                 Log.w(TAG, "Could not read config: " + e.getMessage());
             }
         } else {
-            /* Write default config file */
-            try (FileOutputStream fos = new FileOutputStream(configFile)) {
-                fos.write(("# BeamApp Distributed Erlang Configuration\n" +
-                    "# Edit this file and restart the app to apply changes.\n\n" +
-                    "# Set to false to run as standalone (non-distributed) node\n" +
-                    "distributed=true\n\n" +
-                    "# Node name (long name format: name@ip)\n" +
-                    "node_name=beamapp@10.42.43.2\n\n" +
-                    "# Erlang distribution cookie (must match on all nodes)\n" +
-                    "cookie=beamapp_secret\n\n" +
-                    "# Comma-separated list of nodes to connect to on startup\n" +
-                    "cluster_nodes=arbor_core@10.42.43.4\n").getBytes());
-            } catch (IOException e) {
-                Log.w(TAG, "Could not write default config: " + e.getMessage());
+            /* Write a default config. Try shared storage first so it is easy to
+             * edit; if that is denied (no All-files-access), fall back to the
+             * app-private path so there is always a real file to edit rather
+             * than silent built-in defaults. */
+            String defaults =
+                "# BeamApp Distributed Erlang Configuration\n" +
+                "# Edit this file and restart the app to apply changes.\n\n" +
+                "# Set to false to run as standalone (non-distributed) node\n" +
+                "distributed=true\n\n" +
+                "# Node name (long name format: name@ip)\n" +
+                "node_name=beamapp@10.42.43.2\n\n" +
+                "# Erlang distribution cookie (must match on all nodes)\n" +
+                "cookie=beamapp_secret\n\n" +
+                "# Comma-separated list of nodes to connect to on startup\n" +
+                "cluster_nodes=arbor_core@10.42.43.4\n";
+            if (!writeDefaultConfig(new File(CONFIG_PATH), defaults)) {
+                File privateConfig = new File(getFilesDir(), "beam-config");
+                if (writeDefaultConfig(privateConfig, defaults)) {
+                    Log.i(TAG, "Shared storage unavailable; wrote config to "
+                             + privateConfig + " (grant All files access to use "
+                             + CONFIG_PATH + " instead)");
+                }
             }
         }
         return config;
+    }
+
+    /** Write the default config, returning false if the path is not writable. */
+    private boolean writeDefaultConfig(File target, String contents) {
+        try (FileOutputStream fos = new FileOutputStream(target)) {
+            fos.write(contents.getBytes());
+            return true;
+        } catch (IOException e) {
+            Log.w(TAG, "Could not write config to " + target + ": " + e.getMessage());
+            return false;
+        }
     }
 
     private void startEpmd(String binDir, String libDir, String nativeLibDir) {
