@@ -162,6 +162,18 @@ else
     echo "         erlang_src edits are NOT included in this APK."
 fi
 
+# LiteRT-LM jars are staged per-checkout (build/litertlm/), not per-machine, so
+# a fresh clone has none even when the rest of the toolchain is set up. Without
+# them javac emits 32 "package com.google.ai.edge.litertlm does not exist"
+# errors, which reads like broken source rather than a missing dependency. The
+# host branch catches this in its preflight; Termux had no equivalent.
+if ! ls "$PROJECT/build/litertlm/classpath/"*.jar >/dev/null 2>&1; then
+    echo "ERROR: LiteRT-LM jars missing from $PROJECT/build/litertlm/classpath"
+    echo "       GemmaEngine.java cannot compile without them."
+    echo "       Run: ./download_litertlm.sh   (or ./setup_build_env.sh)"
+    exit 1
+fi
+
 BUILD="$PROJECT/build"
 GEN="$BUILD/gen"
 OBJ="$BUILD/obj"

@@ -19,6 +19,8 @@
 # Idempotent: anything already present is left alone, so it is safe to re-run
 # after a partial or interrupted setup.
 #
+# Also stages the per-checkout LiteRT-LM jars via download_litertlm.sh.
+#
 # After this: ./prepare_assets.sh && ./build.sh
 #
 set -euo pipefail
@@ -29,6 +31,7 @@ if [[ -z "${TERMUX_VERSION:-}" && ! -d /data/data/com.termux/files/usr ]]; then
     exit 1
 fi
 
+PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOME_DIR="${TERMUX_HOME:-${HOME:-/data/data/com.termux/files/home}}"
 SHERPA_HOME="$HOME_DIR/sherpa-onnx"
 MODELS="$HOME_DIR/sherpa-models"
@@ -59,12 +62,12 @@ fetch() {
     echo "ERROR: could not download $url"; exit 1
 }
 
-say "1/6  Termux packages"
+say "1/7  Termux packages"
 # dx is not used (build.sh calls D8 from r8.jar) but apksigner/aapt2 are.
 pkg install -y aapt2 apksigner zip unzip tar bzip2 curl git openjdk-17 erlang cmake
 echo "  ok"
 
-say "2/6  android.jar (API 33)"
+say "2/7  android.jar (API 33)"
 if have "$JAR_DIR/android.jar"; then
     echo "  present: android.jar"
 else
@@ -74,11 +77,11 @@ else
     echo "  installed: $JAR_DIR/android.jar"
 fi
 
-say "3/6  r8.jar (D8 dexer)"
+say "3/7  r8.jar (D8 dexer)"
 fetch "https://maven.google.com/com/android/tools/r8/$R8_VER/r8-$R8_VER.jar" \
       "$TOOLS/r8.jar"
 
-say "4/6  debug keystore"
+say "4/7  debug keystore"
 if have "$KS"; then
     echo "  present: .debug.keystore"
 else
@@ -88,7 +91,7 @@ else
     echo "  generated: $KS"
 fi
 
-say "5/6  sherpa-onnx prebuilt JNI libs ($SHERPA_VER)"
+say "5/7  sherpa-onnx prebuilt JNI libs ($SHERPA_VER)"
 # Prebuilt, not built from source: compiling sherpa-onnx on-device takes hours.
 # prepare_assets.sh reads two different layouts, so map the tarball into both.
 if have "$SHERPA_HOME/build/lib/libsherpa-onnx-jni.so"; then
@@ -105,7 +108,7 @@ else
     echo "  installed 4 .so files"
 fi
 
-say "6/6  sherpa models"
+say "6/7  sherpa models"
 # "<release-channel>/<file>"; note the upstream typo in
 # speaker-recongition-models — that really is the tag name.
 BASE="https://github.com/k2-fsa/sherpa-onnx/releases/download"
@@ -132,6 +135,18 @@ for p in "${PLAIN[@]}"; do
     fetch "$BASE/$p" "$MODELS/$(basename "$p")"
 done
 
+say "7/7  LiteRT-LM jars (per-checkout, not per-machine)"
+# These stage into $PROJECT/build/, so unlike everything above they belong to
+# this checkout rather than $HOME — a second clone needs its own copy. Omitting
+# this step is not a graceful failure: javac reports 32 errors of the form
+# "package com.google.ai.edge.litertlm does not exist", which reads like broken
+# source rather than a missing dependency.
+if ls "$PROJECT/build/litertlm/classpath/"*.jar >/dev/null 2>&1; then
+    echo "  present: $(ls "$PROJECT/build/litertlm/classpath/"*.jar | wc -l) jars"
+else
+    "$PROJECT/download_litertlm.sh"
+fi
+
 say "done"
 cat <<EOF
   android.jar   $JAR_DIR/android.jar
@@ -139,10 +154,12 @@ cat <<EOF
   keystore      $KS
   sherpa libs   $SHERPA_HOME/build/lib
   models        $MODELS  ($(du -sh "$MODELS" 2>/dev/null | cut -f1))
+  litertlm      $PROJECT/build/litertlm/classpath
 
-Next, from wherever the repo is checked out:
+Next, from this checkout:
   ./prepare_assets.sh && ./build.sh
 
-Both derive the project root from their own location, so the tree can live
-anywhere. Only the toolchain above is tied to \$HOME (override with TERMUX_HOME).
+The scripts derive the project root from their own location, so the tree can
+live anywhere. The toolchain above is tied to \$HOME (override with TERMUX_HOME);
+the LiteRT jars are per-checkout.
 EOF
