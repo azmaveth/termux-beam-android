@@ -54,6 +54,30 @@ public class BeamService extends Service {
         return shared;   // nothing exists yet — shared is the preferred target
     }
 
+    /**
+     * Config file to WRITE to.
+     *
+     * Same preference order as {@link #resolveConfigFile}, but the shared path
+     * is only returned when it is demonstrably writable — probed by actually
+     * creating the file, because canWrite() reports the filesystem's opinion
+     * and says nothing about Android's scoped-storage layer. A path that merely
+     * ought to work is not good enough here: a failed save surfaces to the user
+     * as an edit that silently vanished.
+     */
+    static File resolveWritableConfigFile(Context ctx) {
+        File shared = new File(CONFIG_PATH);
+        if (shared.exists()) {
+            if (shared.canWrite()) return shared;
+        } else {
+            try {
+                if (shared.createNewFile()) return shared;
+            } catch (IOException | SecurityException ignored) {
+                /* shared storage denied — fall through to app-private */
+            }
+        }
+        return new File(ctx.getFilesDir(), "beam-config");
+    }
+
     private final IBinder binder = new LocalBinder();
     private Handler handler;
     private OutputCallback outputCallback;
@@ -719,13 +743,9 @@ public class BeamService extends Service {
                 "cookie=beamapp_secret\n\n" +
                 "# Comma-separated list of nodes to connect to on startup\n" +
                 "cluster_nodes=arbor_core@10.42.43.4\n";
-            if (!writeDefaultConfig(new File(CONFIG_PATH), defaults)) {
-                File privateConfig = new File(getFilesDir(), "beam-config");
-                if (writeDefaultConfig(privateConfig, defaults)) {
-                    Log.i(TAG, "Shared storage unavailable; wrote config to "
-                             + privateConfig + " (grant All files access to use "
-                             + CONFIG_PATH + " instead)");
-                }
+            File target = resolveWritableConfigFile(this);
+            if (writeDefaultConfig(target, defaults)) {
+                Log.i(TAG, "Wrote default config to " + target);
             }
         }
         return config;

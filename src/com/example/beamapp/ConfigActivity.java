@@ -219,11 +219,15 @@ public class ConfigActivity extends Activity {
             out.append(k).append("=").append(e.getValue()).append("\n");
         }
 
-        try (FileOutputStream fos = new FileOutputStream(BeamService.resolveConfigFile(this))) {
+        /* Writable resolver, not the read one: on a device without All-files
+         * access the read resolver still points at /sdcard when no config
+         * exists yet, so saving there fails and the edit is lost. */
+        File target = BeamService.resolveWritableConfigFile(this);
+        try (FileOutputStream fos = new FileOutputStream(target)) {
             fos.write(out.toString().getBytes());
             return true;
         } catch (IOException e) {
-            Toast.makeText(this, "Save failed: " + e.getMessage(),
+            Toast.makeText(this, "Save failed (" + target + "): " + e.getMessage(),
                 Toast.LENGTH_LONG).show();
             return false;
         }
