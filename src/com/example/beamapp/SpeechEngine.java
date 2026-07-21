@@ -640,7 +640,53 @@ public class SpeechEngine {
         return "{\"status\":\"idle\"}";
     }
 
-    /** Transcribe a WAV file using streaming recognizer (batch mode). */
+    /**
+     * Encoder warm-up length. The online model emits nothing usable until it
+     * has seen roughly this much non-degenerate audio — and digital silence
+     * does NOT count, because all-zero frames give degenerate log-mel
+     * features that never let the encoder settle. Measured on-device with one
+     * fixed utterance ("The quick brown fox jumps over the lazy dog"):
+     *
+     *   no padding        -> "S over the Lazy do"
+     *   +2.5s digital sil -> "S jumps over the Lazy Dog"   (still broken)
+     *   +2.5s dither      -> "The quick brown fox jumps over the lazy dog"
+     *
+     * Room tone counts only partially (a real recording with 1.7 s of room
+     * noise still lost its first word), so we prepend synthetic dither rather
+     * than relying on ambient noise or a bigger pre-roll buffer.
+     */
+    private static final int WARMUP_MS = 2500;
+
+    /**
+     * Feed low-level dither so the encoder is warm before real audio arrives.
+     * The dither itself decodes to nothing, so it adds no spurious tokens.
+     */
+    private void warmUpStream(OnlineStream stream) {
+        int total = SAMPLE_RATE * WARMUP_MS / 1000;
+        int chunk = SAMPLE_RATE / 10;
+        float[] buf = new float[chunk];
+        for (int off = 0; off < total; off += chunk) {
+            int len = Math.min(chunk, total - off);
+            for (int i = 0; i < len; i++) {
+                buf[i] = (float) (Math.sin((off + i) / 8.0) * 12.0 / 32768.0);
+            }
+            stream.acceptWaveform(len == chunk ? buf : Arrays.copyOf(buf, len), SAMPLE_RATE);
+            while (recognizer.isReady(stream)) {
+                recognizer.decode(stream);
+            }
+        }
+    }
+
+    /**
+     * Transcribe a WAV file with the streaming recognizer.
+     *
+     * An online recognizer has to be driven like a stream: fed in small
+     * chunks, decoded as it goes, with endpoints accumulated. Handing it the
+     * whole file in one acceptWaveform() and decoding once only ever yielded
+     * roughly the last 1-1.5 s of audio, and clips shorter than that returned
+     * nothing at all ("Baltimore" -> "", the pangram -> "S over the Lazy do").
+     * This mirrors streamListen's read loop, which drives the model correctly.
+     */
     public String transcribeFile(String wavPath) {
         if (recognizer == null) return "{\"error\":\"STT not initialized\"}";
 
@@ -652,20 +698,44 @@ public class SpeechEngine {
             }
 
             OnlineStream stream = recognizer.createStream();
-            stream.acceptWaveform(samples, SAMPLE_RATE);
-            stream.inputFinished();
+            StringBuilder allText = new StringBuilder();
+            try {
+                warmUpStream(stream);
+                int chunk = SAMPLE_RATE / 10;   // 100 ms, same as streamListen
+                for (int off = 0; off < samples.length; off += chunk) {
+                    int end = Math.min(off + chunk, samples.length);
+                    stream.acceptWaveform(Arrays.copyOfRange(samples, off, end), SAMPLE_RATE);
+                    while (recognizer.isReady(stream)) {
+                        recognizer.decode(stream);
+                    }
+                    /* Finalize at each endpoint — reset() otherwise discards
+                     * everything decoded since the previous one. */
+                    if (recognizer.isEndpoint(stream)) {
+                        String seg = recognizer.getResult(stream).getText().trim();
+                        if (!seg.isEmpty()) {
+                            if (allText.length() > 0) allText.append(" ");
+                            allText.append(seg);
+                        }
+                        recognizer.reset(stream);
+                    }
+                }
 
-            while (recognizer.isReady(stream)) {
-                recognizer.decode(stream);
+                stream.inputFinished();
+                while (recognizer.isReady(stream)) {
+                    recognizer.decode(stream);
+                }
+                String tail = recognizer.getResult(stream).getText().trim();
+                if (!tail.isEmpty()) {
+                    if (allText.length() > 0) allText.append(" ");
+                    allText.append(tail);
+                }
+            } finally {
+                stream.release();
             }
 
-            OnlineRecognizerResult result = recognizer.getResult(stream);
-            stream.release();
-
             long elapsed = System.currentTimeMillis() - t0;
-            String text = result.getText().trim();
             // Apply punctuation post-processing
-            String punctuated = addPunctuation(text);
+            String punctuated = addPunctuation(allText.toString().trim());
 
             return "{\"text\":\"" + escJson(punctuated)
                 + "\",\"duration\":" + String.format("%.1f", (float) samples.length / SAMPLE_RATE)
@@ -1049,6 +1119,7 @@ public class SpeechEngine {
             }
 
             stream = recognizer.createStream();
+            warmUpStream(stream);
 
             // Feed lookback buffer first (audio captured before this method was called)
             if (lookback != null && lookback.length > 0) {
@@ -1278,6 +1349,7 @@ public class SpeechEngine {
         acquireListenLock();
         try {
             stream = recognizer.createStream();
+            warmUpStream(stream);
 
             long startTime = System.currentTimeMillis();
             long maxMs = maxDurationSec * 1000L;
