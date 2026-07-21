@@ -1559,6 +1559,7 @@ public class BridgeServer {
             GemmaEngine.Status s = gemmaEngine.status();
             return "{\"loaded\":true,\"backend\":\"" + backend + "\",\"model_path\":\""
                 + escJson(s.modelPath) + "\",\"load_ms\":" + (System.currentTimeMillis() - t0)
+                + ",\"opencl\":\"" + escJson(GemmaEngine.openClStatus()) + "\""
                 + ",\"loaded_at\":" + s.loadedAt + "}";
         } catch (Throwable t) {
             return "{\"error\":\"" + escJson(String.valueOf(t.getMessage()))

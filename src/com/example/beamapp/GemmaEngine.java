@@ -77,6 +77,64 @@ public class GemmaEngine {
     }
 
     /**
+     * Paths where ARM's Mali userspace blob lives. On this SoC that blob
+     * exports the full OpenCL API (clGetPlatformIDs, clCreateContext,
+     * clEnqueueNDRangeKernel, clBuildProgram, clCommand*KHR, …) even though
+     * the vendor ships no libOpenCL.so anywhere on the device.
+     */
+    private static final String[] MALI_BLOB_PATHS = {
+        "/vendor/lib64/egl/libGLES_mali.so",
+        "/vendor/lib64/libGLES_mali.so",
+        "/system/vendor/lib64/egl/libGLES_mali.so",
+    };
+
+    private static boolean openClPreloadTried = false;
+    private static String openClPreloadResult = "not attempted";
+
+    /**
+     * Pull OpenCL symbols into the process before LiteRT-LM probes for them.
+     *
+     * The GPU backend loads a model fine here but fails at generation with
+     * "Can not find OpenCL library on this device", because it resolves
+     * dlopen("libOpenCL.so") and MediaTek never created that name — the
+     * implementation is inside the Mali GLES blob instead.
+     *
+     * Loading the blob by absolute path only helps if LiteRT falls back to
+     * dlsym(RTLD_DEFAULT, ...) after its own dlopen fails. If it keeps a
+     * private handle this will not be enough, and the fix becomes shipping a
+     * copy named libOpenCL.so in jniLibs (so the app's own lib dir satisfies
+     * the name lookup) or a root symlink at /vendor/lib64/libOpenCL.so.
+     * Cheap to try first; the outcome is reported back in gemma_load's reply
+     * either way, so a failure here is diagnostic rather than silent.
+     */
+    private static synchronized String preloadOpenCL() {
+        if (openClPreloadTried) return openClPreloadResult;
+        openClPreloadTried = true;
+        for (String p : MALI_BLOB_PATHS) {
+            if (!new File(p).exists()) continue;
+            try {
+                System.load(p);
+                openClPreloadResult = "loaded " + p;
+                Log.i(TAG, "OpenCL preload: " + openClPreloadResult);
+                return openClPreloadResult;
+            } catch (Throwable t) {
+                openClPreloadResult = "failed " + p + ": " + t.getMessage();
+                Log.w(TAG, "OpenCL preload: " + openClPreloadResult);
+            }
+        }
+        if ("not attempted".equals(openClPreloadResult)) {
+            openClPreloadResult = "no Mali blob found";
+            Log.w(TAG, "OpenCL preload: " + openClPreloadResult);
+        }
+        return openClPreloadResult;
+    }
+
+    /** Outcome of the last OpenCL preload attempt, for reporting to callers. */
+    public static String openClStatus() {
+        return openClPreloadResult;
+    }
+
+    /**
      * Load a model on a named backend: "cpu" (default) or "gpu".
      *
      * Worth trying GPU: on the reference Android device the vendor benchmarks
@@ -131,6 +189,11 @@ public class GemmaEngine {
             String[] parts = backendName.split(",");
             String textName = parts.length > 0 && !parts[0].trim().isEmpty()
                 ? parts[0].trim() : "cpu";
+
+            /* Any GPU slot means LiteRT will go looking for OpenCL. */
+            if (backendName.toLowerCase(Locale.US).contains("gpu")) {
+                preloadOpenCL();
+            }
             Backend visionBackend = parts.length > 1 ? backendFor(parts[1].trim()) : null;
             Backend audioBackend  = parts.length > 2 ? backendFor(parts[2].trim()) : null;
             Log.i(TAG, "Backends: text=" + textName
