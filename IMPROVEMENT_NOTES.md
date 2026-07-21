@@ -4,6 +4,137 @@ Things noticed while working in the code, not yet fixed (unless marked).
 Companion to VOICE_REVIEW.md (the original prioritized review). Add to this
 file as new items surface.
 
+## Round 8 (2026-07-20/21) — on-device LLM evaluation
+
+Goal: find out whether STT → LLM → TTS can run entirely on the phone at
+conversational latency, and specifically whether the offline (SenseVoice)
+recognizer is "too slow" for realtime voice. Device: BraX3, MediaTek MT6835
+(Dimensity 6100/6300 class, 2x Cortex-A76 ~2.2 GHz + 6x A55), Mali G57,
+8 GB RAM, **no swap and no zram**.
+
+### Answer to the original question: STT is not the bottleneck
+
+Measured end to end:
+
+| Leg | Latency |
+|-----|---------|
+| Offline STT (SenseVoice), 3 s utterance | **~230 ms** (13x realtime) |
+| Gemma 4 E2B (CPU) | **2635 ms + 134 ms/word** |
+| TTS first audio | ~390 ms (short) — ~1100 ms (2.5 s reply) |
+
+A 15-word spoken reply is ~230 + 4635 + 700 ≈ **5.6 s**, of which the LLM is
+~83% and STT ~4%. The streaming-vs-offline STT question is noise at this
+scale — use the accurate transcript. Offline latency scales near-linearly:
+3.7 s → 279 ms, 7.4 s → 569 ms, 14.8 s → 1291 ms, 29.6 s → 3208 ms.
+
+### Model comparison (all via LiteRT-LM 0.14.0, CPU)
+
+| Model | Size | Load | Output | Speed |
+|-------|------|------|--------|-------|
+| **gemma-4-E2B-it** | 2.6 GB | 6.4 s warm / 25.6 s cold, ~415 MB | coherent | **2635 ms + 133.5 ms/word** (~7.5 words/s, ~10 tok/s) |
+| granite-4.0-350m | 468 MB | 0.76 s, ~161 MB | **garbage** | — |
+| qwen3-0.6b (int4) | 498 MB | 5.4 s, ~515 MB | coherent but **always reasons** | 13-37 s/turn |
+
+**Gemma 4 E2B wins, which inverts what parameter counts predict.** Both small
+models failed for reasons unrelated to size:
+
+- **granite-4.0-350m emits degenerate text** — `"=s=s=s=s…"`, `".j.j.j.j…"`,
+  on 75 s runs, from *freshly loaded sessions* (so not context pollution). It
+  *is* instruction-tuned (tagged `conversational`, a finetune of `-base`), so
+  that isn't it either. Most likely a bad conversion of its unusual
+  `granitemoehybrid` architecture; the bundle has 97 downloads against
+  Qwen3-0.6B's 98K, so essentially nobody has exercised it.
+- **qwen3-0.6b reasons by default and cannot be stopped from here.** Neither
+  the upstream trick of pre-filling an empty `<think>\n\n</think>\n\n` block
+  nor `/no_think` (prefix or suffix) suppressed it — every reply still began
+  `<think>`. LiteRT-LM never applies the chat template itself, so there is no
+  path to `enable_thinking=false`. Reasoning costs 13-37 s per turn, making a
+  4x smaller model *slower* than Gemma.
+
+Reference points from the vendor's own table: S26 Ultra CPU 46.9 tok/s /
+1.8 s TTFT; Raspberry Pi 5 CPU 7.6 tok/s / 7.8 s TTFT. The MT6835 sits near
+the Pi on decode but much better on prefill.
+
+### Chat templates are per-family and share no syntax
+
+LiteRT-LM does **not** apply the template even though the bundle embeds one.
+An untemplated prompt returns `{"text":""}` after burning seconds of compute —
+that is what "the model loads but produces nothing" looks like.
+
+```
+Gemma 4   <|turn>user\n … <turn|>\n<|turn>model\n      (NOT Gemma 2/3's <start_of_turn>)
+Granite   <|start_of_role|>user<|end_of_role|> … <|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>
+Qwen3     <|im_start|>user\n … <|im_end|>\n<|im_start|>assistant\n  (+ empty <think> block)
+```
+
+`GemmaEngine.applyChatTemplate` selects on the model filename. That is a
+silent-failure risk if a filename ever lacks the family name.
+
+### GPU: usable in principle, blocked by a missing symlink
+
+**The GPU is not broken and the earlier "GPU is a dead end" conclusion was
+wrong** — every GPU failure before this point was the *vision encoder*, not
+the GPU. With vision/audio null (text-only), models load on GPU fine:
+
+```
+qwen3-0.6b  gpu -> loaded in 19.3 s (kernel compilation), ~1.2 GB
+gemma-4-E2B gpu -> loaded in 74.5 s
+```
+
+Generation then fails with:
+
+```
+UNKNOWN: Can not find OpenCL library on this device
+```
+
+LiteRT-LM's GPU backend requires **OpenCL**. This device ships OpenGL ES and
+Vulkan but no `libOpenCL.so` anywhere under /vendor, /system or /odm.
+
+**But the OpenCL implementation is present** — ARM builds it into the Mali
+GLES blob:
+
+```
+/vendor/lib64/egl/libGLES_mali.so   (42 MB)
+  exports clGetPlatformIDs, clCreateContext, clEnqueueNDRangeKernel,
+          clBuildProgram, clCloneKernel, clCommand*KHR, …
+```
+
+MediaTek simply never created the `libOpenCL.so` name that
+`dlopen("libOpenCL.so")` resolves. So this is an exposure problem, not a
+driver-authoring problem. Options, cheapest first:
+
+1. **Ship a copy of the blob in the APK as `libOpenCL.so`** (jniLibs/arm64-v8a),
+   so it lands in the app's `nativeLibraryDir`, which *is* on the app's dlopen
+   search path. No root. Risks: +42 MB APK, and the blob's DT_NEEDED vendor
+   dependencies may not resolve inside the app's linker namespace.
+2. **`System.load()` the absolute vendor path early**, before LiteRT probes.
+   Only helps if LiteRT resolves via `dlsym(RTLD_DEFAULT, …)` rather than its
+   own `dlopen` handle — worth one experiment.
+3. **Root / Magisk**: symlink `/vendor/lib64/libOpenCL.so`. Cleanest if root
+   is acceptable; /vendor is read-only otherwise.
+4. Do **not** write an OpenCL driver. The implementation exists; and a
+   from-scratch stack is Mesa/rusticl territory.
+
+Temper expectations: the vendor's 6x GPU speedup is measured on flagship
+Adreno/Apple silicon. A mid-range Mali G57 may deliver much less, and kernel
+compilation costs 19-74 s per load. Worth trying, not worth assuming.
+
+### Recommendation
+
+Keep the LLM on CPU with Gemma 4 E2B and accept ~4.6 s turns for now; that is
+a usable assistant, not a natural conversation. Highest-value follow-ups:
+
+- **Overlap TTS with generation** — at 134 ms/word decode versus ~700 ms TTS
+  first-audio, speech stays ahead of the model after ~6-8 words, so speaking
+  sentence one while it writes sentence two removes the generation tail from
+  perceived latency.
+- **Keep prompts short.** 2.6 s of the budget is prefill.
+- **Try the OpenCL exposure** above; it is the only lever that could plausibly
+  move latency by an order of magnitude on-device.
+- Failing that, move **only** the LLM to a cluster GPU node (an RTX 3060 sits
+  on .97) and keep STT and TTS local — the privacy-sensitive audio never
+  leaves the phone, and turns would drop comfortably under 2 s.
+
 ## Round 7 (2026-07-20) — the on-device checklist run
 
 Ran the 10-item checklist at the bottom of this file against the live phone
