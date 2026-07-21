@@ -193,13 +193,21 @@ public class GemmaEngine {
      *               sides on the closing marker)
      *   Granite  — "<|start_of_role|>user<|end_of_role|>" …
      *              "<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+     *   Qwen3    — ChatML: "<|im_start|>user\n" … "<|im_end|>\n<|im_start|>assistant\n"
+     *              followed by an EMPTY "<think>\n\n</think>\n\n" block.
+     *
+     * That empty think block is not cosmetic. Qwen3 reasons by default and
+     * would spend its entire budget on chain-of-thought before answering —
+     * fatal for a voice turn. Pre-filling a closed think block is what the
+     * upstream template emits for enable_thinking=false.
      *
      * Selected from the loaded model's filename, defaulting to Gemma. A prompt
      * that already carries role markers is passed through untouched, so a
      * caller can build multi-turn context or use a family we don't know about.
      */
     private String applyChatTemplate(String prompt) {
-        if (prompt.contains("<|turn>") || prompt.contains("<|start_of_role|>")) {
+        if (prompt.contains("<|turn>") || prompt.contains("<|start_of_role|>")
+                || prompt.contains("<|im_start|>")) {
             return prompt;
         }
         String model = loadedModelPath == null
@@ -207,6 +215,10 @@ public class GemmaEngine {
         if (model.contains("granite")) {
             return "<|start_of_role|>user<|end_of_role|>" + prompt
                  + "<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>";
+        }
+        if (model.contains("qwen")) {
+            return "<|im_start|>user\n" + prompt
+                 + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
         }
         return "<|turn>user\n" + prompt + "<turn|>\n<|turn>model\n";
     }
