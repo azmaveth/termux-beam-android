@@ -15,7 +15,8 @@
 #
 set -euo pipefail
 
-PROJECT="/data/data/com.termux/files/home/BeamApp"
+# Project root is this script's directory, not a fixed path.
+PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGE="$PROJECT/build/litertlm"
 CLASSPATH_DIR="$STAGE/classpath"
 NATIVE_LIB_DIR="$PROJECT/build/lib/arm64-v8a"

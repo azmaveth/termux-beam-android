@@ -1,10 +1,16 @@
 #!/bin/bash
 # Prepare BEAM runtime files for APK bundling
-exec > /data/data/com.termux/files/home/BeamApp/prepare.log 2>&1
+
+# Project root is wherever this script lives, not a fixed path — hardcoding
+# ~/BeamApp meant a clone anywhere else silently populated the wrong tree.
+PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TERMUX_HOME="${TERMUX_HOME:-${HOME:-/data/data/com.termux/files/home}}"
+TERMUX_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+
+exec > "$PROJECT/prepare.log" 2>&1
 set -ex
 
-PROJECT="/data/data/com.termux/files/home/BeamApp"
-ERLROOT="/data/data/com.termux/files/usr/lib/erlang"
+ERLROOT="${ERLROOT:-$TERMUX_PREFIX/lib/erlang}"
 LIBDIR="$PROJECT/build/lib/arm64-v8a"
 ASSETS="$PROJECT/assets/erlang"
 
@@ -52,17 +58,17 @@ cp "$ERTS/bin/epmd" "$LIBDIR/libepmd.so"
 
 # Dependent shared libraries
 # Resolve via the unversioned symlink so we always get whatever Termux has
-cp -L "/data/data/com.termux/files/usr/lib/libncursesw.so.6" "$LIBDIR/libncursesw_compat.so"
-cp -L "/data/data/com.termux/files/usr/lib/libz.so.1"        "$LIBDIR/libz_compat.so"
-cp    "/data/data/com.termux/files/usr/lib/libc++_shared.so" "$LIBDIR/libc++_shared.so"
+cp -L "$TERMUX_PREFIX/lib/libncursesw.so.6" "$LIBDIR/libncursesw_compat.so"
+cp -L "$TERMUX_PREFIX/lib/libz.so.1"        "$LIBDIR/libz_compat.so"
+cp    "$TERMUX_PREFIX/lib/libc++_shared.so" "$LIBDIR/libc++_shared.so"
 # OpenSSL — needed by crypto/ssl NIFs. Android requires lib*.so naming.
-cp -L "/data/data/com.termux/files/usr/lib/libcrypto.so.3"   "$LIBDIR/libcrypto3.so"
-cp -L "/data/data/com.termux/files/usr/lib/libssl.so.3"      "$LIBDIR/libssl3.so"
+cp -L "$TERMUX_PREFIX/lib/libcrypto.so.3"   "$LIBDIR/libcrypto3.so"
+cp -L "$TERMUX_PREFIX/lib/libssl.so.3"      "$LIBDIR/libssl3.so"
 
 # === Sherpa-onnx JNI (native speech engine) ===
-SHERPA_HOME="/data/data/com.termux/files/home/sherpa-onnx"
-SHERPA_MODEL="/data/data/com.termux/files/home/sherpa-models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17"
-TTS_MODEL="/data/data/com.termux/files/home/sherpa-models/kitten-nano-en-v0_2-fp16"
+SHERPA_HOME="$TERMUX_HOME/sherpa-onnx"
+SHERPA_MODEL="$TERMUX_HOME/sherpa-models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17"
+TTS_MODEL="$TERMUX_HOME/sherpa-models/kitten-nano-en-v0_2-fp16"
 # Onnxruntime shared lib
 cp "$SHERPA_HOME/android-ort/jni/arm64-v8a/libonnxruntime.so" "$LIBDIR/libonnxruntime.so"
 # C API shared lib (dependency of JNI)
@@ -81,7 +87,7 @@ cp "$SHERPA_MODEL/decoder-epoch-99-avg-1.int8.onnx" "$STT_ASSETS/"
 cp "$SHERPA_MODEL/joiner-epoch-99-avg-1.int8.onnx" "$STT_ASSETS/"
 cp "$SHERPA_MODEL/tokens.txt" "$STT_ASSETS/"
 # Silero VAD model
-cp "/data/data/com.termux/files/home/sherpa-models/silero_vad.onnx" "$STT_ASSETS/"
+cp "$TERMUX_HOME/sherpa-models/silero_vad.onnx" "$STT_ASSETS/"
 
 # === TTS Model files (KittenTTS nano, in assets, extracted at runtime) ===
 TTS_ASSETS="$PROJECT/assets/tts-model"
@@ -94,7 +100,7 @@ cp "$TTS_MODEL/tokens.txt" "$TTS_ASSETS/"
 cp -r "$TTS_MODEL/espeak-ng-data" "$TTS_ASSETS/"
 
 # === Punctuation model (online punct, ~7MB int8) ===
-PUNCT_MODEL="/data/data/com.termux/files/home/sherpa-models/sherpa-onnx-online-punct-en-2024-08-06"
+PUNCT_MODEL="$TERMUX_HOME/sherpa-models/sherpa-onnx-online-punct-en-2024-08-06"
 PUNCT_ASSETS="$PROJECT/assets/punct-model"
 rm -rf "$PUNCT_ASSETS"
 mkdir -p "$PUNCT_ASSETS"
@@ -102,7 +108,7 @@ cp "$PUNCT_MODEL/model.int8.onnx" "$PUNCT_ASSETS/"
 cp "$PUNCT_MODEL/bpe.vocab" "$PUNCT_ASSETS/"
 
 # === SenseVoice offline STT model (~228MB int8) ===
-SENSEVOICE_MODEL="/data/data/com.termux/files/home/sherpa-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17"
+SENSEVOICE_MODEL="$TERMUX_HOME/sherpa-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17"
 SV_ASSETS="$PROJECT/assets/sensevoice-model"
 rm -rf "$SV_ASSETS"
 mkdir -p "$SV_ASSETS"
@@ -114,9 +120,9 @@ DIAR_ASSETS="$PROJECT/assets/diarization"
 rm -rf "$DIAR_ASSETS"
 mkdir -p "$DIAR_ASSETS"
 # Pyannote segmentation model (int8, ~1.5MB)
-cp "/data/data/com.termux/files/home/sherpa-models/sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx" "$DIAR_ASSETS/segmentation.onnx"
+cp "$TERMUX_HOME/sherpa-models/sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx" "$DIAR_ASSETS/segmentation.onnx"
 # 3D-Speaker embedding model (~29MB)
-cp "/data/data/com.termux/files/home/sherpa-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx" "$DIAR_ASSETS/embedding.onnx"
+cp "$TERMUX_HOME/sherpa-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx" "$DIAR_ASSETS/embedding.onnx"
 
 # === OTP boot files ===
 cp "$ERLROOT/bin/start_clean.boot" "$ASSETS/bin/"

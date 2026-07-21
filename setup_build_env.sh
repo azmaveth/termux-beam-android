@@ -29,7 +29,7 @@ if [[ -z "${TERMUX_VERSION:-}" && ! -d /data/data/com.termux/files/usr ]]; then
     exit 1
 fi
 
-HOME_DIR="/data/data/com.termux/files/home"
+HOME_DIR="${TERMUX_HOME:-${HOME:-/data/data/com.termux/files/home}}"
 SHERPA_HOME="$HOME_DIR/sherpa-onnx"
 MODELS="$HOME_DIR/sherpa-models"
 TOOLS="$HOME_DIR/tools"
@@ -140,10 +140,9 @@ cat <<EOF
   sherpa libs   $SHERPA_HOME/build/lib
   models        $MODELS  ($(du -sh "$MODELS" 2>/dev/null | cut -f1))
 
-Next:
-  cd ~/BeamApp && ./prepare_assets.sh && ./build.sh
+Next, from wherever the repo is checked out:
+  ./prepare_assets.sh && ./build.sh
 
-Note: both of those hardcode PROJECT=$HOME_DIR/BeamApp, so the repo must be
-checked out at exactly that path — running them from another directory still
-operates on ~/BeamApp and will fail confusingly.
+Both derive the project root from their own location, so the tree can live
+anywhere. Only the toolchain above is tied to \$HOME (override with TERMUX_HOME).
 EOF

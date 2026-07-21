@@ -27,27 +27,35 @@ else
     MODE=host
 fi
 
+# The project root is wherever this script lives — NOT a fixed path. Termux mode
+# used to hardcode ~/BeamApp, which meant running the script from a clone
+# somewhere else silently operated on ~/BeamApp instead: the erlc glob found no
+# erlang_src and stayed literal, and the failure looked like a broken build
+# rather than a misplaced checkout.
+PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Toolchain lives in the user's home, independent of where the tree is checked
+# out. TERMUX_HOME is overridable for non-standard installs.
+TERMUX_HOME="${TERMUX_HOME:-${HOME:-/data/data/com.termux/files/home}}"
+TERMUX_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+
 if [[ "$MODE" == termux ]]; then
-    exec > /data/data/com.termux/files/home/BeamApp/build.log 2>&1
+    exec > "$PROJECT/build.log" 2>&1
     # Mirror the log to shared storage on exit, success or failure. Termux's
     # home is under its own uid, so nothing else on the device — including the
     # BeamApp itself — can read build.log there. /sdcard is the one filesystem
     # both uids can see, which makes a failed build diagnosable without having
     # to hand-copy the log every time.
-    trap 'cp -f /data/data/com.termux/files/home/BeamApp/build.log \
-              /sdcard/beamapp-build.log 2>/dev/null || true' EXIT
+    trap 'cp -f "$PROJECT/build.log" /sdcard/beamapp-build.log 2>/dev/null || true' EXIT
     set -x
-    export PATH="/data/data/com.termux/files/usr/bin:$PATH"
-    PROJECT="/data/data/com.termux/files/home/BeamApp"
-    ANDROID_JAR="/data/data/com.termux/files/home/HelloWorld/build/android-13/android.jar"
+    export PATH="$TERMUX_PREFIX/bin:$PATH"
+    ANDROID_JAR="${ANDROID_JAR:-$TERMUX_HOME/HelloWorld/build/android-13/android.jar}"
     AAPT2=aapt2
     ZIPALIGN=zipalign
     APKSIGNER=apksigner
-    DEX() { java -cp /data/data/com.termux/files/home/tools/r8.jar com.android.tools.r8.D8 "$@"; }
-    KS="${KS:-/data/data/com.termux/files/home/.debug.keystore}"
+    DEX() { java -cp "$TERMUX_HOME/tools/r8.jar" com.android.tools.r8.D8 "$@"; }
+    KS="${KS:-$TERMUX_HOME/.debug.keystore}"
     KS_ALIAS=debug
 else
-    PROJECT="$(cd "$(dirname "$0")" && pwd)"
     exec > >(tee "$PROJECT/build.log") 2>&1
     set -x
 
