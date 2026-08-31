@@ -35,7 +35,9 @@
 -spec nodes_info() -> [map()].
 nodes_info() ->
     Self = node(),
-    AllNodes = [Self | nodes()],
+    %% nodes/0 is visible-only; this node dials out with -hidden, so all of
+    %% its peers are hidden connections.
+    AllNodes = [Self | nodes(connected)],
     lists:map(fun(N) ->
         OTP = safe_rpc(N, erlang, system_info, [otp_release]),
         Apps = safe_rpc(N, application, which_applications, []),
@@ -73,8 +75,8 @@ apps(Node) ->
 -spec eval(node(), binary()) -> {ok, term()} | {error, term()}.
 eval(Node, Code) when is_binary(Code) ->
     case safe_rpc(Node, 'Elixir.Code', eval_string, [Code]) of
-        {Result, _Bindings} -> {ok, Result};
         {badrpc, Reason} -> {error, {badrpc, Reason}};
+        {Result, _Bindings} -> {ok, Result};
         Other -> {ok, Other}
     end.
 

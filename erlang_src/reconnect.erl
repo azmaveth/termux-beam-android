@@ -4,6 +4,10 @@
 %%% Designed to survive global's aggressive partition teardowns — when global
 %%% disconnects all nodes, this process reconnects them within seconds.
 %%%
+%%% Monitors hidden connections too: this node runs with -hidden, so every
+%%% peer it dials is a hidden connection and a visible-only monitor never
+%%% fires for any of them.
+%%%
 %%% Usage:
 %%%   reconnect:start(['node1@host', 'node2@host']).
 %%%   reconnect:start().  %% reads from BEAM_CLUSTER_NODES env var
@@ -59,7 +63,7 @@ status() ->
 %%% Internal
 
 init(TargetNodes) ->
-    net_kernel:monitor_nodes(true, [{node_type, visible}]),
+    net_kernel:monitor_nodes(true, [{node_type, all}]),
     loop(TargetNodes, #{}, 0).
 
 loop(Targets, Retrying, ReconnectCount) ->
@@ -100,7 +104,8 @@ loop(Targets, Retrying, ReconnectCount) ->
             end;
 
         {status, From} ->
-            Connected = nodes(),
+            %% nodes/0 is visible-only and this node's peers are all hidden.
+            Connected = nodes(connected),
             Down = [N || N <- Targets, not lists:member(N, Connected)],
             From ! {reconnect_status, #{
                 targets => Targets,
