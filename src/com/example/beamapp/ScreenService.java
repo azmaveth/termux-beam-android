@@ -94,16 +94,15 @@ public class ScreenService extends AccessibilityService {
 
     private void handleClient(Socket client) {
         new Thread(() -> {
-            try {
-                client.setSoTimeout(30000);
-                BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream()));
-                PrintWriter out = new PrintWriter(client.getOutputStream(), true);
+            try (Socket c = client) {
+                c.setSoTimeout(30000);
+                BufferedReader in = new BufferedReader(new InputStreamReader(c.getInputStream()));
+                PrintWriter out = new PrintWriter(c.getOutputStream(), true);
                 String line;
                 while ((line = in.readLine()) != null) {
                     String result = dispatch(line);
                     out.println(result);
                 }
-                client.close();
             } catch (Exception e) {
                 Log.e(TAG, "Handle error", e);
             }
@@ -357,13 +356,15 @@ public class ScreenService extends AccessibilityService {
             if (target == null) {
                 return "{\"error\":\"not found: " + esc(id) + "\"}";
             }
-            // Focus first, then click
+            // Focus first, then click (walk to a clickable ancestor / gesture-tap fallback)
             target.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
-            target.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-            boolean clicked = true;
+            boolean clicked = performClickOn(target);
             Rect bounds = new Rect();
             target.getBoundsInScreen(bounds);
             target.recycle();
+            if (!clicked) {
+                return "{\"error\":\"click failed\"}";
+            }
             return "{\"clicked\":true,\"bounds\":[" + bounds.left + "," + bounds.top
                     + "," + bounds.width() + "," + bounds.height() + "]}";
         } finally {
@@ -625,14 +626,14 @@ public class ScreenService extends AccessibilityService {
                 if (root != null) {
                     AccessibilityNodeInfo focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
                     if (focused != null) {
+                        boolean ok = false;
                         if (Build.VERSION.SDK_INT >= 30) {
-                            boolean ok = focused.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.getId());
-                            focused.recycle();
-                            root.recycle();
-                            if (ok) return "{\"key\":\"enter\",\"ok\":true}";
+                            ok = focused.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.getId());
                         }
-                        // Fallback: press enter via ACTION_CLICK on focused node
-                        boolean ok = focused.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                        if (!ok) {
+                            // Fallback: press enter via ACTION_CLICK on focused node
+                            ok = focused.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                        }
                         focused.recycle();
                         root.recycle();
                         return ok ? "{\"key\":\"enter\",\"ok\":true}" : "{\"error\":\"enter failed\"}";

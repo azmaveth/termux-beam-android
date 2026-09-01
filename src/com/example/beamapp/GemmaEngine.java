@@ -22,8 +22,11 @@ import java.util.concurrent.atomic.AtomicReference;
  * file (Gemma 4 etc. from HuggingFace litert-community) and runs blocking or
  * streaming text generation.
  *
- * Single-model semantics: only one engine loaded at a time. Thread-safe via
- * instance lock — all operations serialize.
+ * Single-model semantics: only one engine loaded at a time. Generations
+ * serialize via the `busy` flag, but the lock is NOT held during inference —
+ * so cancel() and status() work mid-generation instead of blocking until it
+ * finishes. load()/unload() cancel any in-flight generation and wait for it
+ * to release the session before touching engine state.
  */
 public class GemmaEngine {
     private static final String TAG = "GemmaEngine";
@@ -33,6 +36,13 @@ public class GemmaEngine {
 
     private Engine engine;
     private Session session;
+    /* True while a generate/streamGenerate owns the session. Guarded by lock;
+     * waiters are woken via lock.notifyAll(). */
+    private boolean busy = false;
+    /* Set by cancel() while busy, so a cancel that lands before the library
+     * call actually starts is re-issued instead of silently lost. Guarded by
+     * lock; cleared when a generation claims the session. */
+    private boolean cancelRequested = false;
     private String loadedModelPath;
     private long loadedAt;
 
@@ -66,7 +76,9 @@ public class GemmaEngine {
                     "Model file not found or unreadable: " + modelPath);
             }
 
-            /* Unload any existing engine first. */
+            /* Unload any existing engine first (cancels and waits out any
+             * in-flight generation). */
+            waitUntilIdleLocked();
             unloadLocked();
 
             File cacheDir = new File(context.getCacheDir(), "litertlm");
@@ -114,16 +126,25 @@ public class GemmaEngine {
      * @throws IllegalStateException if no model is loaded
      */
     public String generate(String prompt) {
-        synchronized (lock) {
-            requireLoaded();
+        Session s = acquireSessionForGeneration();
+        try {
+            synchronized (lock) {
+                /* A cancel that landed between acquire and here has nothing
+                 * to interrupt yet — honor it instead of losing it. */
+                if (cancelRequested) {
+                    throw new RuntimeException("generate() cancelled before start");
+                }
+            }
             List<InputData> inputs = Collections.<InputData>singletonList(
                 new InputData.Text(prompt));
             try {
-                return session.generateContent(inputs);
+                return s.generateContent(inputs);
             } catch (Throwable t) {
                 throw new RuntimeException(
                     "generate() failed: " + t.getMessage(), t);
             }
+        } finally {
+            releaseGeneration();
         }
     }
 
@@ -135,16 +156,17 @@ public class GemmaEngine {
      * @throws IllegalStateException if no model is loaded
      */
     public void streamGenerate(String prompt, final StreamListener listener) {
-        synchronized (lock) {
-            requireLoaded();
+        Session s = acquireSessionForGeneration();
+        try {
             List<InputData> inputs = Collections.<InputData>singletonList(
                 new InputData.Text(prompt));
 
             final CountDownLatch done = new CountDownLatch(1);
             final AtomicReference<Throwable> errorRef = new AtomicReference<Throwable>();
 
+            boolean streamStarted = false;
             try {
-                session.generateContentStream(inputs, new ResponseCallback() {
+                s.generateContentStream(inputs, new ResponseCallback() {
                     @Override
                     public void onNext(String chunk) {
                         try {
@@ -165,9 +187,38 @@ public class GemmaEngine {
                         done.countDown();
                     }
                 });
-                done.await();
+                streamStarted = true;
+
+                /* A cancel() that landed before the stream actually started
+                 * hit an idle session and did nothing — re-issue it now that
+                 * there is something to cancel. */
+                boolean reCancel;
+                synchronized (lock) {
+                    reCancel = cancelRequested;
+                }
+                if (reCancel) {
+                    try { s.cancelProcess(); } catch (Throwable ignore) { }
+                }
             } catch (Throwable t) {
                 errorRef.compareAndSet(null, t);
+            }
+
+            /* Await the terminal callback uninterruptibly: releasing busy
+             * while the native stream still runs would let a second
+             * generation start concurrently. An interrupt is converted into
+             * a cancel, and the wait continues until the stream terminates. */
+            if (streamStarted) {
+                boolean interrupted = false;
+                for (;;) {
+                    try {
+                        done.await();
+                        break;
+                    } catch (InterruptedException ie) {
+                        interrupted = true;
+                        try { s.cancelProcess(); } catch (Throwable ignore) { }
+                    }
+                }
+                if (interrupted) Thread.currentThread().interrupt();
             }
 
             Throwable err = errorRef.get();
@@ -180,14 +231,23 @@ public class GemmaEngine {
                     listener.onDone();
                 } catch (Throwable ignore) { /* ignore */ }
             }
+        } finally {
+            releaseGeneration();
         }
     }
 
-    /** Cancel an in-progress streaming request. Safe to call concurrently. */
+    /** Cancel an in-progress streaming request. Safe to call concurrently.
+     *  Also flags the request so a cancel that races the library-call start
+     *  is re-issued by the generating thread instead of being lost. */
     public void cancel() {
         Session s;
         synchronized (lock) {
-            s = session;
+            if (busy) {
+                cancelRequested = true;
+                s = session;
+            } else {
+                s = null;
+            }
         }
         if (s != null) {
             try {
@@ -198,9 +258,11 @@ public class GemmaEngine {
         }
     }
 
-    /** Release model and engine resources. Idempotent. */
+    /** Release model and engine resources. Idempotent. Cancels and waits out
+     *  any in-flight generation first. */
     public void unload() {
         synchronized (lock) {
+            waitUntilIdleLocked();
             unloadLocked();
         }
     }
@@ -231,6 +293,73 @@ public class GemmaEngine {
     }
 
     // --- internals ---
+
+    /**
+     * Claim the session for one generation: waits for any in-flight
+     * generation to finish, marks busy, and returns the session to use.
+     * The caller MUST pair this with releaseGeneration() in a finally block,
+     * and must run the actual inference outside the lock so cancel() can
+     * interleave.
+     *
+     * @throws IllegalStateException if no model is loaded (checked again
+     *         after waiting, since unload() may have run meanwhile)
+     */
+    private Session acquireSessionForGeneration() {
+        synchronized (lock) {
+            requireLoaded();
+            boolean interrupted = false;
+            while (busy) {
+                try {
+                    lock.wait();
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+            if (interrupted) Thread.currentThread().interrupt();
+            requireLoaded();
+            busy = true;
+            cancelRequested = false;
+            return session;
+        }
+    }
+
+    private void releaseGeneration() {
+        synchronized (lock) {
+            busy = false;
+            lock.notifyAll();
+        }
+    }
+
+    /**
+     * Cancel any in-flight generation and wait until it releases the
+     * session. Must be called with the lock held. The generation thread can
+     * finish because inference runs outside the lock; re-cancels on each
+     * wakeup in case the first cancelProcess() raced the stream start.
+     */
+    private void waitUntilIdleLocked() {
+        boolean interrupted = false;
+        int rounds = 0;
+        while (busy) {
+            if (session != null) {
+                try {
+                    session.cancelProcess();
+                } catch (Throwable t) { /* ignore */ }
+            }
+            try {
+                /* Do NOT re-assert the interrupt inside the loop: wait()
+                 * with the flag set throws immediately, which would spin
+                 * with the lock held and starve releaseGeneration(). */
+                lock.wait(500);
+            } catch (InterruptedException e) {
+                interrupted = true;
+            }
+            if (++rounds % 20 == 0) {
+                Log.w(TAG, "still waiting for in-flight generation to stop ("
+                    + (rounds / 2) + "s) — cancelProcess() may not be honored");
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
+    }
 
     private void requireLoaded() {
         if (engine == null || session == null) {

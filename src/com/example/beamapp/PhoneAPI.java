@@ -51,6 +51,8 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Phone hardware/OS capabilities exposed as simple JSON-returning methods.
@@ -141,136 +143,142 @@ public class PhoneAPI {
             dummyTexture.setDefaultBufferSize(640, 480);
             Surface previewSurface = new Surface(dummyTexture);
 
-            CountDownLatch photoLatch = new CountDownLatch(1);
-            final String[] error = {null};
+            final AtomicReference<CameraDevice> cameraRef = new AtomicReference<CameraDevice>();
+            // Set when the open times out, so a late onOpened closes the camera itself
+            final AtomicBoolean abandoned = new AtomicBoolean(false);
+            try {
+                CountDownLatch photoLatch = new CountDownLatch(1);
+                final String[] error = {null};
 
-            reader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
-                @Override
-                public void onImageAvailable(ImageReader r) {
-                    Image image = null;
-                    try {
-                        image = r.acquireLatestImage();
-                        if (image == null) return;
-                        ByteBuffer buffer = image.getPlanes()[0].getBuffer();
-                        byte[] bytes = new byte[buffer.remaining()];
-                        buffer.get(bytes);
-                        FileOutputStream fos = new FileOutputStream(outputPath);
-                        fos.write(bytes);
-                        fos.close();
-                    } catch (Exception e) {
-                        error[0] = e.getMessage();
-                    } finally {
-                        if (image != null) image.close();
-                        photoLatch.countDown();
-                    }
-                }
-            }, handler);
-
-            Semaphore cameraLock = new Semaphore(0);
-            final CameraDevice[] cameraRef = {null};
-
-            cm.openCamera(cameraId, new CameraDevice.StateCallback() {
-                @Override
-                public void onOpened(CameraDevice camera) {
-                    cameraRef[0] = camera;
-                    cameraLock.release();
-                }
-                @Override
-                public void onDisconnected(CameraDevice camera) {
-                    cameraLock.release();
-                }
-                @Override
-                public void onError(CameraDevice camera, int err) {
-                    error[0] = "Camera error: " + err;
-                    cameraLock.release();
-                }
-            }, handler);
-
-            if (!cameraLock.tryAcquire(5, TimeUnit.SECONDS)) {
-                previewSurface.release(); dummyTexture.release();
-                ht.quitSafely();
-                return "{\"error\":\"camera open timeout\"}";
-            }
-            if (error[0] != null) {
-                previewSurface.release(); dummyTexture.release();
-                ht.quitSafely();
-                return "{\"error\":\"" + esc(error[0]) + "\"}";
-            }
-
-            CameraDevice camera = cameraRef[0];
-            Surface jpegSurface = reader.getSurface();
-
-            // Session with both preview + JPEG surfaces
-            CountDownLatch sessionLatch = new CountDownLatch(1);
-            camera.createCaptureSession(Arrays.asList(previewSurface, jpegSurface),
-                new CameraCaptureSession.StateCallback() {
+                reader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
                     @Override
-                    public void onConfigured(CameraCaptureSession session) {
+                    public void onImageAvailable(ImageReader r) {
+                        Image image = null;
                         try {
-                            // Run preview on dummy surface to warm up 3A
-                            CaptureRequest.Builder preview = camera.createCaptureRequest(
-                                CameraDevice.TEMPLATE_PREVIEW);
-                            preview.addTarget(previewSurface);
-                            preview.set(CaptureRequest.CONTROL_AF_MODE,
-                                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
-                            preview.set(CaptureRequest.CONTROL_AE_MODE,
-                                CaptureRequest.CONTROL_AE_MODE_ON);
-                            session.setRepeatingRequest(preview.build(), null, handler);
-
-                            // After 1.5s warmup, fire still capture to JPEG surface
-                            handler.postDelayed(new Runnable() {
-                                @Override
-                                public void run() {
-                                    try {
-                                        CaptureRequest.Builder capture = camera.createCaptureRequest(
-                                            CameraDevice.TEMPLATE_STILL_CAPTURE);
-                                        capture.addTarget(jpegSurface);
-                                        capture.set(CaptureRequest.JPEG_QUALITY, (byte) 90);
-                                        capture.set(CaptureRequest.CONTROL_AF_MODE,
-                                            CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
-                                        capture.set(CaptureRequest.CONTROL_AE_MODE,
-                                            CaptureRequest.CONTROL_AE_MODE_ON);
-                                        session.stopRepeating();
-                                        session.capture(capture.build(), null, handler);
-                                    } catch (Exception e) {
-                                        error[0] = e.getMessage();
-                                        photoLatch.countDown();
-                                    }
-                                }
-                            }, 1500);
+                            image = r.acquireLatestImage();
+                            if (image == null) return;
+                            ByteBuffer buffer = image.getPlanes()[0].getBuffer();
+                            byte[] bytes = new byte[buffer.remaining()];
+                            buffer.get(bytes);
+                            FileOutputStream fos = new FileOutputStream(outputPath);
+                            fos.write(bytes);
+                            fos.close();
                         } catch (Exception e) {
                             error[0] = e.getMessage();
+                        } finally {
+                            if (image != null) image.close();
                             photoLatch.countDown();
                         }
-                        sessionLatch.countDown();
-                    }
-                    @Override
-                    public void onConfigureFailed(CameraCaptureSession session) {
-                        error[0] = "session configure failed";
-                        sessionLatch.countDown();
-                        photoLatch.countDown();
                     }
                 }, handler);
 
-            sessionLatch.await(5, TimeUnit.SECONDS);
-            photoLatch.await(10, TimeUnit.SECONDS);
+                Semaphore cameraLock = new Semaphore(0);
 
-            camera.close();
-            reader.close();
-            previewSurface.release();
-            dummyTexture.release();
-            ht.quitSafely();
+                cm.openCamera(cameraId, new CameraDevice.StateCallback() {
+                    @Override
+                    public void onOpened(CameraDevice camera) {
+                        cameraRef.set(camera);
+                        if (abandoned.get()) camera.close();
+                        cameraLock.release();
+                    }
+                    @Override
+                    public void onDisconnected(CameraDevice camera) {
+                        error[0] = "camera disconnected";
+                        camera.close();
+                        cameraLock.release();
+                    }
+                    @Override
+                    public void onError(CameraDevice camera, int err) {
+                        error[0] = "Camera error: " + err;
+                        camera.close();
+                        cameraLock.release();
+                    }
+                }, handler);
 
-            if (error[0] != null) {
-                return "{\"error\":\"" + esc(error[0]) + "\"}";
+                if (!cameraLock.tryAcquire(5, TimeUnit.SECONDS)) {
+                    abandoned.set(true);
+                    return "{\"error\":\"camera open timeout\"}";
+                }
+                if (error[0] != null) {
+                    return "{\"error\":\"" + esc(error[0]) + "\"}";
+                }
+
+                CameraDevice camera = cameraRef.get();
+                Surface jpegSurface = reader.getSurface();
+
+                // Session with both preview + JPEG surfaces
+                CountDownLatch sessionLatch = new CountDownLatch(1);
+                camera.createCaptureSession(Arrays.asList(previewSurface, jpegSurface),
+                    new CameraCaptureSession.StateCallback() {
+                        @Override
+                        public void onConfigured(CameraCaptureSession session) {
+                            try {
+                                // Run preview on dummy surface to warm up 3A
+                                CaptureRequest.Builder preview = camera.createCaptureRequest(
+                                    CameraDevice.TEMPLATE_PREVIEW);
+                                preview.addTarget(previewSurface);
+                                preview.set(CaptureRequest.CONTROL_AF_MODE,
+                                    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+                                preview.set(CaptureRequest.CONTROL_AE_MODE,
+                                    CaptureRequest.CONTROL_AE_MODE_ON);
+                                session.setRepeatingRequest(preview.build(), null, handler);
+
+                                // After 1.5s warmup, fire still capture to JPEG surface
+                                handler.postDelayed(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        try {
+                                            CaptureRequest.Builder capture = camera.createCaptureRequest(
+                                                CameraDevice.TEMPLATE_STILL_CAPTURE);
+                                            capture.addTarget(jpegSurface);
+                                            capture.set(CaptureRequest.JPEG_QUALITY, (byte) 90);
+                                            capture.set(CaptureRequest.CONTROL_AF_MODE,
+                                                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+                                            capture.set(CaptureRequest.CONTROL_AE_MODE,
+                                                CaptureRequest.CONTROL_AE_MODE_ON);
+                                            session.stopRepeating();
+                                            session.capture(capture.build(), null, handler);
+                                        } catch (Exception e) {
+                                            error[0] = e.getMessage();
+                                            photoLatch.countDown();
+                                        }
+                                    }
+                                }, 1500);
+                            } catch (Exception e) {
+                                error[0] = e.getMessage();
+                                photoLatch.countDown();
+                            }
+                            sessionLatch.countDown();
+                        }
+                        @Override
+                        public void onConfigureFailed(CameraCaptureSession session) {
+                            error[0] = "session configure failed";
+                            sessionLatch.countDown();
+                            photoLatch.countDown();
+                        }
+                    }, handler);
+
+                sessionLatch.await(5, TimeUnit.SECONDS);
+                photoLatch.await(10, TimeUnit.SECONDS);
+
+                if (error[0] != null) {
+                    return "{\"error\":\"" + esc(error[0]) + "\"}";
+                }
+
+                File f = new File(outputPath);
+                if (!f.exists() || f.length() == 0) {
+                    return "{\"error\":\"photo file not created\"}";
+                }
+                return "{\"path\":\"" + esc(outputPath) + "\",\"size\":" + f.length()
+                    + ",\"width\":" + size.getWidth() + ",\"height\":" + size.getHeight() + "}";
+            } finally {
+                CameraDevice opened = cameraRef.get();
+                if (opened != null) opened.close();
+                reader.close();
+                previewSurface.release();
+                dummyTexture.release();
+                ht.quitSafely();
             }
-
-            File f = new File(outputPath);
-            if (!f.exists() || f.length() == 0) {
-                return "{\"error\":\"photo file not created\"}";
-            }
-            return "{\"path\":\"" + esc(outputPath) + "\",\"size\":" + f.length()
-                + ",\"width\":" + size.getWidth() + ",\"height\":" + size.getHeight() + "}";
         } catch (Exception e) {
             Log.e(TAG, "Camera photo failed", e);
             return "{\"error\":\"" + esc(e.getMessage()) + "\"}";

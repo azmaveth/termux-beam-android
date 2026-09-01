@@ -18,6 +18,9 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.RandomAccessFile;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -58,8 +61,13 @@ public class SpeechEngine {
     private String segmentationModelDir;
     private String embeddingModelPath;
 
-    // Streaming listen state
-    private final AtomicBoolean listening = new AtomicBoolean(false);
+    // Streaming listen state. Each listen session gets its own stop flag —
+    // a mic listen and a BLE-earbud listen (no mic claim) can legitimately
+    // run concurrently, and a single shared flag would let whichever session
+    // ends first cut the other off mid-utterance. stopListening() keeps its
+    // stop-everything semantics by flipping every registered flag.
+    private final Set<AtomicBoolean> activeListens =
+        Collections.newSetFromMap(new ConcurrentHashMap<AtomicBoolean, Boolean>());
     private volatile String partialResult = "";
 
     // TTS playback state (streamed, cancelable)
@@ -1025,7 +1033,7 @@ public class SpeechEngine {
             PartialCallback partialCallback) {
         if (recognizer == null) return "{\"error\":\"STT not initialized\"}";
 
-        listening.set(true);
+        final AtomicBoolean session = beginListenSession();
         partialResult = "";
 
         // Take over the pre-record mic (still recording, no gap; claim
@@ -1068,7 +1076,7 @@ public class SpeechEngine {
             String lastPartial = "";
             StringBuilder allText = new StringBuilder();
 
-            while (listening.get() && (System.currentTimeMillis() - startTime) < maxMs) {
+            while (session.get() && (System.currentTimeMillis() - startTime) < maxMs) {
                 int read = mic.read(buf, 0, buf.length);
                 if (read <= 0) continue;
 
@@ -1154,7 +1162,7 @@ public class SpeechEngine {
             Log.e(TAG, "Stream listen failed", e);
             return "{\"error\":\"" + escJson(e.getMessage()) + "\"}";
         } finally {
-            listening.set(false);
+            endListenSession(session);
             if (stream != null) stream.release();
             if (mic != null) {
                 try { mic.stop(); } catch (Exception ignored) {}
@@ -1165,8 +1173,25 @@ public class SpeechEngine {
         }
     }
 
+    /** Register a new listen session's stop flag. Pair with endListenSession
+     *  in a finally block. */
+    private AtomicBoolean beginListenSession() {
+        AtomicBoolean session = new AtomicBoolean(true);
+        activeListens.add(session);
+        return session;
+    }
+
+    private void endListenSession(AtomicBoolean session) {
+        session.set(false);
+        activeListens.remove(session);
+    }
+
+    /** Stop every in-progress listen session (documented stop-everything
+     *  semantics of the stop_listen command). */
     public void stopListening() {
-        listening.set(false);
+        for (AtomicBoolean session : activeListens) {
+            session.set(false);
+        }
         // Clean up pre-record if it's still running (releases the mic and
         // its claim if no listen ever took it over)
         cancelPreRecord();
@@ -1271,7 +1296,7 @@ public class SpeechEngine {
             ExternalAudioSource source, PartialCallback partialCallback) {
         if (recognizer == null) return "{\"error\":\"STT not initialized\"}";
 
-        listening.set(true);
+        final AtomicBoolean session = beginListenSession();
         partialResult = "";
         OnlineStream stream = null;
 
@@ -1301,7 +1326,7 @@ public class SpeechEngine {
                     }
                 });
 
-            while (listening.get() && source.isActive()
+            while (session.get() && source.isActive()
                     && (System.currentTimeMillis() - startTime) < maxMs) {
                 float[] chunk = source.readChunk();
                 if (chunk == null) {
@@ -1392,7 +1417,7 @@ public class SpeechEngine {
             Log.e(TAG, "External audio stream listen failed", e);
             return "{\"error\":\"" + escJson(e.getMessage()) + "\"}";
         } finally {
-            listening.set(false);
+            endListenSession(session);
             if (stream != null) stream.release();
             releaseListenLock();
         }
@@ -1431,7 +1456,7 @@ public class SpeechEngine {
     public String remoteStreamListen(int maxDurationSec, AudioChunkCallback callback) {
         if (vad == null) return "{\"error\":\"VAD not initialized\"}";
 
-        listening.set(true);
+        final AtomicBoolean session = beginListenSession();
         long startTime = System.currentTimeMillis();
         long maxMs = maxDurationSec * 1000L;
 
@@ -1491,7 +1516,7 @@ public class SpeechEngine {
             short[] rawBuf = new short[SAMPLE_RATE / 10]; // 100ms reads
             float[] floatBuf = new float[rawBuf.length];
 
-            while (listening.get() && (System.currentTimeMillis() - startTime) < maxMs) {
+            while (session.get() && (System.currentTimeMillis() - startTime) < maxMs) {
                 int read = mic.read(rawBuf, 0, rawBuf.length);
                 if (read <= 0) continue;
 
@@ -1515,7 +1540,7 @@ public class SpeechEngine {
             Log.e(TAG, "Remote stream listen failed", e);
             return "{\"error\":\"" + escJson(e.getMessage()) + "\"}";
         } finally {
-            listening.set(false);
+            endListenSession(session);
             if (mic != null) {
                 try { mic.stop(); } catch (Exception ignored) {}
                 mic.release();

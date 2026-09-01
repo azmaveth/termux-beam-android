@@ -306,10 +306,11 @@ public class BridgeServer {
                             }
                         }
                     }
-                    client.close();
                     Log.i(TAG, "Bridge client disconnected");
                 } catch (Exception e) {
                     Log.e(TAG, "Client handler error", e);
+                } finally {
+                    try { client.close(); } catch (Exception ignored) { }
                 }
             }
         }, "bridge-client").start();
@@ -572,6 +573,47 @@ public class BridgeServer {
         br.read(new char[64]);
     }
 
+    /**
+     * Read a command-port response to completion. The server keeps the
+     * connection open and terminates each response with a newline, but ~p
+     * pretty-printing embeds interior newlines and large responses span
+     * multiple packets — so a single read() truncates. Accumulate until the
+     * data ends with a newline AND a short quiet probe confirms nothing more
+     * is in flight (an interior newline can land exactly on a packet
+     * boundary). Returns null when no data arrived at all, so callers can
+     * distinguish "no response" from a response that trims to empty.
+     */
+    private String readBeamResponse(Socket sock, BufferedReader br) throws Exception {
+        StringBuilder sb = new StringBuilder();
+        char[] buf = new char[65536];
+        int n;
+        outer:
+        while ((n = br.read(buf)) > 0) {
+            sb.append(buf, 0, n);
+            if (sb.length() > 8 * 1024 * 1024) break; // safety cap
+            /* Probe loop: data appended by a probe must re-check the
+             * completion condition, never fall back to a blocking
+             * main-timeout read that would hang after a complete response. */
+            while (sb.charAt(sb.length() - 1) == '\n' && !br.ready()) {
+                int mainTimeout = sock.getSoTimeout();
+                sock.setSoTimeout(200);
+                try {
+                    int m = br.read(buf);
+                    if (m <= 0) break outer; // EOF
+                    sb.append(buf, 0, m);
+                    if (sb.length() > 8 * 1024 * 1024) break outer; // safety cap
+                } catch (java.net.SocketTimeoutException quiet) {
+                    break outer; // response complete
+                } finally {
+                    sock.setSoTimeout(mainTimeout);
+                }
+            }
+            /* Here the data ends mid-line or more is already buffered —
+             * either way the next main-timeout read won't spuriously block. */
+        }
+        return sb.length() > 0 ? sb.toString() : null;
+    }
+
     private String cmdBeam(String command) {
         try (Socket sock = new Socket("127.0.0.1", 9876)) {
             sock.setSoTimeout(30000);
@@ -580,11 +622,9 @@ public class BridgeServer {
             authBeamPort(os, br);
             os.write(command.getBytes());
             os.flush();
-            // Read response (terminated by newline)
-            char[] buf = new char[65536];
-            int n = br.read(buf);
-            if (n > 0) {
-                String resp = new String(buf, 0, n).trim();
+            String resp = readBeamResponse(sock, br);
+            if (resp != null) {
+                resp = resp.trim();
                 if (resp.startsWith("ERROR: ")) {
                     return "{\"error\":\"" + escJson(resp.substring(7)) + "\"}";
                 }
@@ -612,10 +652,9 @@ public class BridgeServer {
             authBeamPort(os, br);
             os.write(("eval " + erlExpr).getBytes());
             os.flush();
-            char[] buf = new char[1048576]; // 1 MB buffer for large results
-            int n = br.read(buf);
-            if (n > 0) {
-                String resp = new String(buf, 0, n).trim();
+            String resp = readBeamResponse(sock, br);
+            if (resp != null) {
+                resp = resp.trim();
                 if (resp.startsWith("ERROR: ")) {
                     return "{\"error\":\"" + escJson(resp.substring(7)) + "\"}";
                 }
@@ -1064,14 +1103,27 @@ public class BridgeServer {
         try {
             Process p = Runtime.getRuntime().exec(new String[]{"/system/bin/sh", "-c", cmd});
             java.io.InputStream is = p.getInputStream();
-            java.io.InputStream es = p.getErrorStream();
+            final java.io.InputStream es = p.getErrorStream();
             byte[] buf = new byte[8192];
             StringBuilder out = new StringBuilder();
+            final StringBuilder err = new StringBuilder();
+            /* Drain stderr on its own thread — reading stdout to EOF first
+             * deadlocks when the child fills the stderr pipe buffer. */
+            Thread errThread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        byte[] ebuf = new byte[8192];
+                        int m;
+                        while ((m = es.read(ebuf)) > 0) err.append(new String(ebuf, 0, m));
+                    } catch (java.io.IOException e) { /* ignore */ }
+                }
+            }, "shell-stderr");
+            errThread.start();
             int n;
             while ((n = is.read(buf)) > 0) out.append(new String(buf, 0, n));
-            StringBuilder err = new StringBuilder();
-            while ((n = es.read(buf)) > 0) err.append(new String(buf, 0, n));
             int exitCode = p.waitFor();
+            errThread.join();
             return "{\"exit\":" + exitCode
                 + ",\"stdout\":\"" + escJson(out.toString()) + "\""
                 + ",\"stderr\":\"" + escJson(err.toString()) + "\"}";
@@ -1799,9 +1851,23 @@ public class BridgeServer {
         try {
             Process p = Runtime.getRuntime().exec(new String[]{"/system/bin/sh", "-c", "dumpsys " + service});
             java.io.InputStream is = p.getInputStream();
-            java.io.InputStream es = p.getErrorStream();
+            final java.io.InputStream es = p.getErrorStream();
             byte[] buf = new byte[8192];
             StringBuilder out = new StringBuilder();
+            final StringBuilder err = new StringBuilder();
+            /* Drain stderr on its own thread — reading stdout to EOF first
+             * deadlocks when the child fills the stderr pipe buffer. */
+            Thread errThread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        byte[] ebuf = new byte[8192];
+                        int m;
+                        while ((m = es.read(ebuf)) > 0) err.append(new String(ebuf, 0, m));
+                    } catch (java.io.IOException e) { /* ignore */ }
+                }
+            }, "dumpsys-stderr");
+            errThread.start();
             int n;
             int maxBytes = 65536;
             while ((n = is.read(buf)) > 0 && out.length() < maxBytes) {
@@ -1812,9 +1878,8 @@ public class BridgeServer {
                 /* Drain remaining input to avoid broken pipe */
                 while (is.read(buf) > 0) { /* discard */ }
             }
-            StringBuilder err = new StringBuilder();
-            while ((n = es.read(buf)) > 0) err.append(new String(buf, 0, n));
             p.waitFor();
+            errThread.join();
 
             if (err.length() > 0 && out.length() == 0) {
                 return "{\"error\":\"" + escJson(err.toString().trim()) + "\"}";
@@ -2520,6 +2585,13 @@ public class BridgeServer {
                 readStatus[0] = status;
                 readLatch.countDown();
             }
+            /* Pre-API-33 devices invoke this legacy overload instead */
+            @Override
+            public void onCharacteristicRead(BluetoothGatt gatt, BluetoothGattCharacteristic ch, int status) {
+                readValue[0] = ch.getValue();
+                readStatus[0] = status;
+                readLatch.countDown();
+            }
         };
 
         BluetoothGatt gatt = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE);
@@ -2603,7 +2675,14 @@ public class BridgeServer {
                 && (target.getProperties() & BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) {
                 writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE;
             }
-            gatt.writeCharacteristic(target, data, writeType);
+            if (Build.VERSION.SDK_INT >= 33) {
+                gatt.writeCharacteristic(target, data, writeType);
+            } else {
+                /* writeCharacteristic(ch, byte[], int) is API 33+ */
+                target.setWriteType(writeType);
+                target.setValue(data);
+                gatt.writeCharacteristic(target);
+            }
             if (!writeLatch.await(10, TimeUnit.SECONDS)) return "{\"error\":\"write timeout\"}";
             if (writeStatus[0] != BluetoothGatt.GATT_SUCCESS) return "{\"error\":\"write failed, status=" + writeStatus[0] + "\"}";
 
@@ -2665,6 +2744,14 @@ public class BridgeServer {
                 long ts = System.currentTimeMillis();
                 values.add("{\"time\":" + ts + ",\"hex\":\"" + hex + "\",\"utf8\":\"" + escJson(utf8) + "\"}");
             }
+            /* Pre-API-33 devices invoke this legacy overload instead;
+             * guarded so API 33+ can't append the same value twice. */
+            @Override
+            public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic ch) {
+                if (Build.VERSION.SDK_INT < 33) {
+                    onCharacteristicChanged(gatt, ch, ch.getValue());
+                }
+            }
         };
 
         BluetoothGatt gatt = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE);
@@ -2687,7 +2774,13 @@ public class BridgeServer {
                 byte[] enableValue = canNotify
                     ? BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                     : BluetoothGattDescriptor.ENABLE_INDICATION_VALUE;
-                gatt.writeDescriptor(cccd, enableValue);
+                if (Build.VERSION.SDK_INT >= 33) {
+                    gatt.writeDescriptor(cccd, enableValue);
+                } else {
+                    /* writeDescriptor(desc, byte[]) is API 33+ */
+                    cccd.setValue(enableValue);
+                    gatt.writeDescriptor(cccd);
+                }
                 descriptorLatch.await(5, TimeUnit.SECONDS);
             }
 
@@ -2696,7 +2789,12 @@ public class BridgeServer {
             /* Disable notifications */
             gatt.setCharacteristicNotification(target, false);
             if (cccd != null) {
-                gatt.writeDescriptor(cccd, BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE);
+                if (Build.VERSION.SDK_INT >= 33) {
+                    gatt.writeDescriptor(cccd, BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE);
+                } else {
+                    cccd.setValue(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE);
+                    gatt.writeDescriptor(cccd);
+                }
                 Thread.sleep(200);
             }
 
@@ -2818,11 +2916,16 @@ public class BridgeServer {
 
         char c = json.charAt(start);
         if (c == '"') {
-            /* String value — find closing quote, then unescape */
+            /* String value — find closing quote (a quote is escaped only when
+             * preceded by an odd number of backslashes), then unescape */
             int end = json.indexOf('"', start + 1);
-            while (end > 0 && json.charAt(end - 1) == '\\') {
+            while (end > 0) {
+                int bs = 0;
+                for (int i = end - 1; i > start && json.charAt(i) == '\\'; i--) bs++;
+                if ((bs & 1) == 0) break;
                 end = json.indexOf('"', end + 1);
             }
+            if (end < 0) return "";
             String raw = json.substring(start + 1, end);
             /* Unescape standard JSON escapes */
             return raw.replace("\\\"", "\"")

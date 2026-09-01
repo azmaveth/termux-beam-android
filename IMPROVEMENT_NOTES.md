@@ -294,3 +294,20 @@ Round-3 open items:
     `gemma:load(...)` now returns plain `ok` on success (previously
     `{error, RawJson}` — callers relying on that inversion, if any, will
     notice).
+
+## Noticed 2026-08-31 — remote ASR health check (deferred)
+
+`speech:status/0`'s remote branch reports healthy whenever the ASR node is
+merely reachable: `whereis(asr_health_check)` returns `undefined` when the
+node is up but nothing registers that name (nothing does today), and
+`undefined` lands in the catch-all `{ok, ...}` clause. The
+`'Elixir.Asr':health` fallback only runs after `{badrpc, _}` — i.e. when
+the node is unreachable — where a second rpc:call to the same node must
+also fail, so the fallback can never succeed.
+
+Deliberately not fixed now: remote ASR is unused pending a redesign. When
+that redesign happens, make the health check three-way — pid ⇒ healthy,
+`undefined` ⇒ ask `'Elixir.Asr':health` directly, `{badrpc, _}` ⇒
+node unreachable — or drop the `asr_health_check` probe entirely and call
+`Asr.health` as the single source of truth. A matching comment sits on
+`status/0` in erlang_src/speech.erl.

@@ -24,7 +24,7 @@ PROJECT="/data/data/com.termux/files/home/BeamApp"
 ASSETS_LIB="$PROJECT/assets/erlang/lib"
 NATIVE_LIB_DIR="$PROJECT/build/lib/arm64-v8a"
 BEAM_SERVICE="$PROJECT/src/com/example/beamapp/BeamService.java"
-WORK_DIR="${WORK_DIR:-/tmp/beamapp_deps}"
+WORK_DIR="${WORK_DIR:-${TMPDIR:-/data/data/com.termux/files/usr/tmp}/beamapp_deps}"
 
 # === Single source of truth for hex dep versions ===
 # Format: "name version"

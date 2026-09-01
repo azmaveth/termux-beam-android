@@ -5,12 +5,15 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <pthread.h>
 #include <android/log.h>
 
 #define TAG "BeamLauncher"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
+/* Guards beam_pid and the pipe fds: JNI entry points run on arbitrary Java threads */
+static pthread_mutex_t beam_lock = PTHREAD_MUTEX_INITIALIZER;
 static pid_t beam_pid = -1;
 static int stdin_pipe[2] = {-1, -1};
 static int stdout_pipe[2] = {-1, -1};
@@ -20,9 +23,12 @@ Java_com_example_beamapp_BeamService_nativeStartBeam(
     JNIEnv *env, jobject thiz,
     jstring beam_path, jstring home_dir, jstring boot_script)
 {
+    pthread_mutex_lock(&beam_lock);
     if (beam_pid > 0) {
         LOGI("BEAM already running with pid %d", beam_pid);
-        return beam_pid;
+        pid_t pid = beam_pid;
+        pthread_mutex_unlock(&beam_lock);
+        return pid;
     }
 
     const char *beam = (*env)->GetStringUTFChars(env, beam_path, NULL);
@@ -31,6 +37,7 @@ Java_com_example_beamapp_BeamService_nativeStartBeam(
 
     if (pipe(stdin_pipe) < 0 || pipe(stdout_pipe) < 0) {
         LOGE("pipe() failed: %s", strerror(errno));
+        pthread_mutex_unlock(&beam_lock);
         (*env)->ReleaseStringUTFChars(env, beam_path, beam);
         (*env)->ReleaseStringUTFChars(env, home_dir, home);
         (*env)->ReleaseStringUTFChars(env, boot_script, boot);
@@ -40,6 +47,7 @@ Java_com_example_beamapp_BeamService_nativeStartBeam(
     beam_pid = fork();
     if (beam_pid < 0) {
         LOGE("fork() failed: %s", strerror(errno));
+        pthread_mutex_unlock(&beam_lock);
         (*env)->ReleaseStringUTFChars(env, beam_path, beam);
         (*env)->ReleaseStringUTFChars(env, home_dir, home);
         (*env)->ReleaseStringUTFChars(env, boot_script, boot);
@@ -71,33 +79,44 @@ Java_com_example_beamapp_BeamService_nativeStartBeam(
     close(stdout_pipe[1]);
 
     LOGI("BEAM started with pid %d", beam_pid);
+    pid_t pid = beam_pid;
+    pthread_mutex_unlock(&beam_lock);
 
     (*env)->ReleaseStringUTFChars(env, beam_path, beam);
     (*env)->ReleaseStringUTFChars(env, home_dir, home);
     (*env)->ReleaseStringUTFChars(env, boot_script, boot);
 
-    return beam_pid;
+    return pid;
 }
 
 JNIEXPORT void JNICALL
 Java_com_example_beamapp_BeamService_nativeStopBeam(JNIEnv *env, jobject thiz)
 {
-    if (beam_pid > 0) {
-        LOGI("Stopping BEAM pid %d", beam_pid);
-        kill(beam_pid, SIGTERM);
-        int status;
-        waitpid(beam_pid, &status, 0);
-        LOGI("BEAM exited with status %d", status);
-        beam_pid = -1;
-    }
+    pthread_mutex_lock(&beam_lock);
+    pid_t pid = beam_pid;
+    if (pid > 0) beam_pid = -1;
     if (stdin_pipe[1] >= 0) { close(stdin_pipe[1]); stdin_pipe[1] = -1; }
     if (stdout_pipe[0] >= 0) { close(stdout_pipe[0]); stdout_pipe[0] = -1; }
+    pthread_mutex_unlock(&beam_lock);
+
+    if (pid > 0) {
+        LOGI("Stopping BEAM pid %d", pid);
+        kill(pid, SIGTERM);
+        int status;
+        if (waitpid(pid, &status, 0) == pid) {
+            LOGI("BEAM exited with status %d", status);
+        }
+    }
 }
 
 JNIEXPORT jstring JNICALL
 Java_com_example_beamapp_BeamService_nativeReadOutput(JNIEnv *env, jobject thiz)
 {
-    if (stdout_pipe[0] < 0) return (*env)->NewStringUTF(env, "");
+    pthread_mutex_lock(&beam_lock);
+    if (stdout_pipe[0] < 0) {
+        pthread_mutex_unlock(&beam_lock);
+        return (*env)->NewStringUTF(env, "");
+    }
 
     char buf[4096];
     fd_set fds;
@@ -111,9 +130,11 @@ Java_com_example_beamapp_BeamService_nativeReadOutput(JNIEnv *env, jobject thiz)
         ssize_t n = read(stdout_pipe[0], buf, sizeof(buf) - 1);
         if (n > 0) {
             buf[n] = '\0';
+            pthread_mutex_unlock(&beam_lock);
             return (*env)->NewStringUTF(env, buf);
         }
     }
+    pthread_mutex_unlock(&beam_lock);
     return (*env)->NewStringUTF(env, "");
 }
 
@@ -121,23 +142,34 @@ JNIEXPORT void JNICALL
 Java_com_example_beamapp_BeamService_nativeWriteInput(
     JNIEnv *env, jobject thiz, jstring input)
 {
-    if (stdin_pipe[1] < 0) return;
+    pthread_mutex_lock(&beam_lock);
+    if (stdin_pipe[1] < 0) {
+        pthread_mutex_unlock(&beam_lock);
+        return;
+    }
 
     const char *str = (*env)->GetStringUTFChars(env, input, NULL);
     write(stdin_pipe[1], str, strlen(str));
     write(stdin_pipe[1], "\n", 1);
+    pthread_mutex_unlock(&beam_lock);
     (*env)->ReleaseStringUTFChars(env, input, str);
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_example_beamapp_BeamService_nativeIsRunning(JNIEnv *env, jobject thiz)
 {
-    if (beam_pid <= 0) return JNI_FALSE;
+    pthread_mutex_lock(&beam_lock);
+    if (beam_pid <= 0) {
+        pthread_mutex_unlock(&beam_lock);
+        return JNI_FALSE;
+    }
     int status;
     pid_t ret = waitpid(beam_pid, &status, WNOHANG);
     if (ret == beam_pid) {
         beam_pid = -1;
+        pthread_mutex_unlock(&beam_lock);
         return JNI_FALSE;
     }
+    pthread_mutex_unlock(&beam_lock);
     return JNI_TRUE;
 }

@@ -48,7 +48,8 @@
     port :: inet:port_number(),
     next_id :: pos_integer(),
     pending :: #{pos_integer() => {pid(), reference()}},
-    stream_sub :: pid() | undefined
+    stream_sub :: pid() | undefined,
+    rxbuf = <<>> :: binary()
 }).
 
 -define(SERVER, ?MODULE).
@@ -208,6 +209,9 @@ handle_call(unsubscribe_stream, _From, State) ->
 
 handle_cast(_Msg, State) -> {noreply, State}.
 
+handle_info(connect, #state{socket = Sock} = State) when Sock =/= undefined ->
+    %% Already reconnected via the call path; the timer is a no-op.
+    {noreply, State};
 handle_info(connect, State) ->
     case connect(State) of
         {ok, State2} ->
@@ -219,23 +223,31 @@ handle_info(connect, State) ->
             {noreply, State}
     end;
 
-handle_info({tcp, _Sock, Data}, State) ->
-    %% May receive multiple lines
-    Lines = binary:split(Data, <<"\n">>, [global, trim_all]),
+handle_info({tcp, Sock, Data}, #state{socket = Sock, rxbuf = RxBuf} = State) ->
+    %% May receive multiple lines, and a line may span several packets:
+    %% process only complete lines, carrying the partial tail in rxbuf.
+    Parts = binary:split(<<RxBuf/binary, Data/binary>>, <<"\n">>, [global]),
+    Rest = lists:last(Parts),
+    Lines = [L || L <- lists:droplast(Parts), L =/= <<>>],
     State2 = lists:foldl(fun handle_response/2, State, Lines),
-    {noreply, State2};
+    {noreply, State2#state{rxbuf = Rest}};
 
-handle_info({tcp_closed, _}, State) ->
+handle_info({tcp_closed, Sock}, #state{socket = Sock} = State) ->
     io:format("[android] Bridge connection closed, reconnecting...~n"),
     State2 = fail_pending(closed, State),
     erlang:send_after(1000, self(), connect),
-    {noreply, State2#state{socket = undefined}};
+    {noreply, State2#state{socket = undefined, rxbuf = <<>>}};
 
-handle_info({tcp_error, _, Reason}, State) ->
+handle_info({tcp_error, Sock, Reason}, #state{socket = Sock} = State) ->
     io:format("[android] Bridge TCP error: ~p~n", [Reason]),
     State2 = fail_pending({tcp_error, Reason}, State),
     erlang:send_after(1000, self(), connect),
-    {noreply, State2#state{socket = undefined}};
+    {noreply, State2#state{socket = undefined, rxbuf = <<>>}};
+
+handle_info({tcp_error, Sock, _Reason}, State) ->
+    %% Error from a stale socket already replaced by a reconnect.
+    gen_tcp:close(Sock),
+    {noreply, State};
 
 handle_info(_Info, State) -> {noreply, State}.
 
@@ -250,11 +262,11 @@ terminate(_Reason, #state{socket = Sock}) ->
 %%% ============================================================
 
 connect(#state{host = Host, port = Port} = State) ->
-    case gen_tcp:connect(Host, Port, [binary, {active, true}, {packet, line},
+    case gen_tcp:connect(Host, Port, [binary, {active, true},
                                        {buffer, 65536}], 2000) of
         {ok, Sock} ->
             send_auth(Sock),
-            {ok, State#state{socket = Sock}};
+            {ok, State#state{socket = Sock, rxbuf = <<>>}};
         {error, _} = Err -> Err
     end.
 
@@ -289,6 +301,7 @@ do_send(Cmd, Args, From, #state{socket = Sock, next_id = Id, pending = Pend} = S
             Pend2 = maps:put(Id, From, Pend),
             {noreply, State#state{next_id = Id + 1, pending = Pend2}};
         {error, Reason} ->
+            gen_tcp:close(Sock),
             {reply, {error, Reason}, State#state{socket = undefined}}
     end.
 
@@ -389,19 +402,26 @@ extract_raw_value(<<"\"", _/binary>> = B) ->
     <<"\"", T/binary>> = B,
     S = extract_string(T, <<>>),
     <<"\"", S/binary, "\"">>;
-extract_raw_value(<<"{", _/binary>> = B) -> extract_balanced(B, ${, $}, 0, <<>>);
-extract_raw_value(<<"[", _/binary>> = B) -> extract_balanced(B, $[, $], 0, <<>>);
+extract_raw_value(<<"{", _/binary>> = B) -> extract_balanced(B, ${, $}, 0, false, <<>>);
+extract_raw_value(<<"[", _/binary>> = B) -> extract_balanced(B, $[, $], 0, false, <<>>);
 extract_raw_value(B) -> extract_token(B, <<>>).
 
-extract_balanced(<<>>, _, _, _, Acc) -> Acc;
-extract_balanced(<<Open, T/binary>>, Open, Close, D, Acc) ->
-    extract_balanced(T, Open, Close, D+1, <<Acc/binary, Open>>);
-extract_balanced(<<Close, _/binary>>, _Open, Close, 1, Acc) ->
+extract_balanced(<<>>, _, _, _, _, Acc) -> Acc;
+%% Inside a string: consume escape pairs and content without counting braces
+extract_balanced(<<$\\, C, T/binary>>, Open, Close, D, true, Acc) ->
+    extract_balanced(T, Open, Close, D, true, <<Acc/binary, $\\, C>>);
+extract_balanced(<<$", T/binary>>, Open, Close, D, InStr, Acc) ->
+    extract_balanced(T, Open, Close, D, not InStr, <<Acc/binary, $">>);
+extract_balanced(<<C, T/binary>>, Open, Close, D, true, Acc) ->
+    extract_balanced(T, Open, Close, D, true, <<Acc/binary, C>>);
+extract_balanced(<<Open, T/binary>>, Open, Close, D, false, Acc) ->
+    extract_balanced(T, Open, Close, D+1, false, <<Acc/binary, Open>>);
+extract_balanced(<<Close, _/binary>>, _Open, Close, 1, false, Acc) ->
     <<Acc/binary, Close>>;
-extract_balanced(<<Close, T/binary>>, Open, Close, D, Acc) ->
-    extract_balanced(T, Open, Close, D-1, <<Acc/binary, Close>>);
-extract_balanced(<<C, T/binary>>, Open, Close, D, Acc) ->
-    extract_balanced(T, Open, Close, D, <<Acc/binary, C>>).
+extract_balanced(<<Close, T/binary>>, Open, Close, D, false, Acc) ->
+    extract_balanced(T, Open, Close, D-1, false, <<Acc/binary, Close>>);
+extract_balanced(<<C, T/binary>>, Open, Close, D, false, Acc) ->
+    extract_balanced(T, Open, Close, D, false, <<Acc/binary, C>>).
 
 skip_ws(<<" ", T/binary>>) -> skip_ws(T);
 skip_ws(<<"\t", T/binary>>) -> skip_ws(T);

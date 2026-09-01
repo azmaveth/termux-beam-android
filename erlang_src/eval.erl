@@ -70,7 +70,7 @@ run_tts_eval() ->
         io:format("[eval:tts]   ~s... ", [Label]),
         T0 = erlang:monotonic_time(millisecond),
         case call(<<"tts">>, list_to_binary(Text), 30000) of
-            {ok, #{<<"gen_ms">> := GenMs, <<"duration">> := Duration} = R} ->
+            {ok, #{<<"gen_ms">> := GenMs, <<"duration">> := Duration}} ->
                 Wall = erlang:monotonic_time(millisecond) - T0,
                 Chars = length(Text),
                 CharsPerSec = Chars * 1000.0 / max(1, GenMs),
@@ -126,7 +126,7 @@ run_stt_eval() ->
                 io:format("transcribing... "),
                 T0 = erlang:monotonic_time(millisecond),
                 case call(<<"stt">>, list_to_binary(WavPath), 60000) of
-                    {ok, #{<<"text">> := SttText} = SttR} ->
+                    {ok, #{<<"text">> := SttText}} ->
                         SttMs = erlang:monotonic_time(millisecond) - T0,
                         RTF = SttMs / max(1, AudioDur * 1000),
                         io:format("~pms (RTF ~.3f)~n", [SttMs, RTF]),
@@ -202,7 +202,7 @@ run_roundtrip_eval() ->
         end
     end, Sentences),
     AvgWER = case [W || #{<<"wer">> := W} <- Results] of
-        [] -> -1;
+        [] -> -1.0;
         Ws -> lists:sum(Ws) / length(Ws)
     end,
     Passed = length([R || #{<<"passed">> := true} = R <- Results]),
@@ -375,7 +375,6 @@ normalize_words(Text) ->
     string:tokens(Cleaned, " ").
 
 levenshtein(S, T) ->
-    M = length(S),
     N = length(T),
     %% Build matrix row by row
     Row0 = lists:seq(0, N),

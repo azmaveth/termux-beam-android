@@ -47,6 +47,7 @@ done
 
 NODE_DIR="$(pwd)/node-${NODE_NAME}"
 mkdir -p "$NODE_DIR"
+chmod 700 "$NODE_DIR"
 
 echo "=== Generating TLS distribution config ==="
 
@@ -88,6 +89,7 @@ cat > "$NODE_DIR/vm.args" <<EOF
 -kernel inet_dist_listen_min ${DIST_PORT}
 -kernel inet_dist_listen_max ${DIST_PORT}
 EOF
+chmod 600 "$NODE_DIR/vm.args"
 
 # start.sh
 cat > "$NODE_DIR/start.sh" <<'STARTEOF'

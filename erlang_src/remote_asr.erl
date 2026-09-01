@@ -41,7 +41,8 @@ listen(MaxSec, Node) ->
             ]),
             ok = gen_tcp:send(Sock, Cmd),
             %% Receive chunks and transcribe each
-            Result = recv_loop(Sock, Id, Node, [], 0),
+            RecvTimeout = max(60000, MaxSec * 1000 + 5000),
+            Result = recv_loop(Sock, Id, Node, [], 0, RecvTimeout),
             gen_tcp:close(Sock),
             Result;
         {error, Reason} ->
@@ -71,50 +72,36 @@ send_auth(Sock) ->
             ok
     end.
 
-recv_loop(Sock, Id, Node, Texts, ChunkCount) ->
-    %% Large timeout: VAD may have long silences
-    case gen_tcp:recv(Sock, 0, 60000) of
+recv_loop(Sock, Id, Node, Texts, ChunkCount, RecvTimeout) ->
+    %% Must outlive the bridge-side recording window: the bridge sends
+    %% nothing during silence, so the timeout has to cover all of MaxSec.
+    case gen_tcp:recv(Sock, 0, RecvTimeout) of
         {ok, Line} ->
-            handle_line(Line, Sock, Id, Node, Texts, ChunkCount);
+            handle_line(Line, Sock, Id, Node, Texts, ChunkCount, RecvTimeout);
         {error, timeout} ->
             finalize(Texts, ChunkCount, timeout);
         {error, closed} ->
             finalize(Texts, ChunkCount, closed)
     end.
 
-handle_line(Line, Sock, Id, Node, Texts, ChunkCount) ->
+handle_line(Line, Sock, Id, Node, Texts, ChunkCount, RecvTimeout) ->
     %% Check if this is a chunk (has "audio" key) or final response
     case binary:match(Line, <<"\"audio\"">>) of
         {_, _} ->
-            %% Audio chunk — extract and transcribe
-            ChunkIdx = json_int(Line, <<"chunk">>),
-            Duration = json_str(Line, <<"duration">>),
-            AudioB64 = json_str(Line, <<"audio">>),
-            AudioBin = base64:decode(AudioB64),
-            io:format("[remote_asr] Chunk ~p: ~.1fKB, ~ss audio~n",
-                      [ChunkIdx, byte_size(AudioBin) / 1024.0, Duration]),
-            %% RPC to remote ASR
-            T0 = erlang:monotonic_time(millisecond),
-            case rpc:call(Node, 'Elixir.Asr', transcribe, [AudioBin], ?RPC_TIMEOUT) of
-                {ok, #{<<"text">> := Text}} ->
-                    RpcMs = erlang:monotonic_time(millisecond) - T0,
-                    io:format("[remote_asr]   -> ~s (~pms)~n", [Text, RpcMs]),
-                    recv_loop(Sock, Id, Node, [Text | Texts], ChunkCount + 1);
-                {badrpc, Reason} ->
-                    RpcMs = erlang:monotonic_time(millisecond) - T0,
-                    io:format("[remote_asr]   -> RPC failed (~pms): ~p~n",
-                              [RpcMs, Reason]),
-                    recv_loop(Sock, Id, Node, Texts, ChunkCount + 1);
-                Other ->
-                    RpcMs = erlang:monotonic_time(millisecond) - T0,
-                    io:format("[remote_asr]   -> ~p (~pms)~n", [Other, RpcMs]),
-                    %% Try to extract text from unexpected format
-                    Text = extract_text(Other),
-                    NewTexts = case Text of
-                        <<>> -> Texts;
-                        _ -> [Text | Texts]
-                    end,
-                    recv_loop(Sock, Id, Node, NewTexts, ChunkCount + 1)
+            case decode_chunk(Line) of
+                {ok, ChunkIdx, Duration, AudioBin} ->
+                    handle_chunk(ChunkIdx, Duration, AudioBin,
+                                 Sock, Id, Node, Texts, ChunkCount, RecvTimeout);
+                error ->
+                    %% Malformed or truncated chunk line — {packet, line}
+                    %% splits lines longer than the socket buffer (1MB) at
+                    %% the buffer boundary, so a long utterance's base64 can
+                    %% arrive cut mid-stream. Skip it and keep the segments
+                    %% already transcribed; the leftover fragments have no
+                    %% "audio" key and fall through the keep-going branch.
+                    io:format("[remote_asr] Skipping undecodable chunk line "
+                              "(~p bytes)~n", [byte_size(Line)]),
+                    recv_loop(Sock, Id, Node, Texts, ChunkCount, RecvTimeout)
             end;
         nomatch ->
             %% Final response or other message
@@ -122,9 +109,64 @@ handle_line(Line, Sock, Id, Node, Texts, ChunkCount) ->
                 {_, _} ->
                     finalize(Texts, ChunkCount, ok);
                 nomatch ->
-                    %% Unexpected line, keep going
-                    recv_loop(Sock, Id, Node, Texts, ChunkCount)
+                    case binary:match(Line, <<"\"ok\":false">>) of
+                        {_, _} ->
+                            Err = json_str(Line, <<"error">>),
+                            io:format("[remote_asr] Bridge error: ~s~n", [Err]),
+                            {error, Err};
+                        nomatch ->
+                            %% Unexpected line, keep going
+                            recv_loop(Sock, Id, Node, Texts, ChunkCount, RecvTimeout)
+                    end
             end
+    end.
+
+%% Decode one audio-chunk line defensively. A complete line is one JSON
+%% object ending in "}"; a fragment truncated at the line-buffer boundary
+%% is not, and a truncated base64 payload makes base64:decode/1 badarg —
+%% either way return error instead of crashing recv_loop.
+decode_chunk(Line) ->
+    Trimmed = string:trim(Line),
+    Complete = byte_size(Trimmed) > 0 andalso binary:last(Trimmed) =:= $},
+    case Complete of
+        true ->
+            try
+                {ok, json_int(Line, <<"chunk">>),
+                     json_str(Line, <<"duration">>),
+                     base64:decode(json_str(Line, <<"audio">>))}
+            catch
+                _:_ -> error
+            end;
+        false ->
+            error
+    end.
+
+%% Transcribe one decoded audio chunk on the remote node, then keep receiving.
+handle_chunk(ChunkIdx, Duration, AudioBin, Sock, Id, Node, Texts, ChunkCount, RecvTimeout) ->
+    io:format("[remote_asr] Chunk ~p: ~.1fKB, ~ss audio~n",
+              [ChunkIdx, byte_size(AudioBin) / 1024.0, Duration]),
+    %% RPC to remote ASR
+    T0 = erlang:monotonic_time(millisecond),
+    case rpc:call(Node, 'Elixir.Asr', transcribe, [AudioBin], ?RPC_TIMEOUT) of
+        {ok, #{<<"text">> := Text}} ->
+            RpcMs = erlang:monotonic_time(millisecond) - T0,
+            io:format("[remote_asr]   -> ~s (~pms)~n", [Text, RpcMs]),
+            recv_loop(Sock, Id, Node, [Text | Texts], ChunkCount + 1, RecvTimeout);
+        {badrpc, Reason} ->
+            RpcMs = erlang:monotonic_time(millisecond) - T0,
+            io:format("[remote_asr]   -> RPC failed (~pms): ~p~n",
+                      [RpcMs, Reason]),
+            recv_loop(Sock, Id, Node, Texts, ChunkCount + 1, RecvTimeout);
+        Other ->
+            RpcMs = erlang:monotonic_time(millisecond) - T0,
+            io:format("[remote_asr]   -> ~p (~pms)~n", [Other, RpcMs]),
+            %% Try to extract text from unexpected format
+            Text = extract_text(Other),
+            NewTexts = case Text of
+                <<>> -> Texts;
+                _ -> [Text | Texts]
+            end,
+            recv_loop(Sock, Id, Node, NewTexts, ChunkCount + 1, RecvTimeout)
     end.
 
 finalize(Texts, ChunkCount, Reason) ->

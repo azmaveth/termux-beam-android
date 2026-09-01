@@ -10,10 +10,14 @@
 %%%   %% ... publish each Entry onto the percept bus on the core ...
 %%%   sensor_buffer:ack(LastSeq).   %% prune drained entries
 %%%
-%%% Monotonic integer Seq keys make draining idempotent and survive restarts
-%%% (next Seq is derived from the max key still on disk at init). The buffer is
-%%% bounded: beyond `max` entries the oldest are dropped (a long disconnect costs
-%%% the tail, never the whole series).
+%%% Monotonic integer Seq keys make draining idempotent and survive restarts:
+%%% next Seq comes from the max entry key still on disk OR the persisted
+%%% high-water mark ({meta, last_seq} record), whichever is larger — so a
+%%% fully-drained (empty) buffer does not reset Seq to 1 after a restart and
+%%% strand the core's cursor above every new entry. Entry keys are always
+%%% integers; the meta record uses a tuple key and is never returned by
+%%% fetch_since. The buffer is bounded: beyond `max` entries the oldest are
+%%% dropped (a long disconnect costs the tail, never the whole series).
 %%%
 %%% Design notes live in arbor: .arbor/roadmap/1-brainstorming/
 %%% phone-store-and-forward-percepts.md
@@ -23,6 +27,7 @@
 
 -define(SERVER, sensor_buffer).
 -define(DETS, sensor_buffer_dets).
+-define(META_LAST_SEQ, {meta, last_seq}).
 -define(DEFAULT_INTERVAL, 60000).   %% 60s between sample cycles
 -define(DEFAULT_MAX, 50000).        %% ring cap; oldest dropped beyond this
 -define(CALL_TIMEOUT, 10000).
@@ -97,7 +102,7 @@ init(Opts) ->
     Path = dets_path(),
     case dets:open_file(?DETS, [{file, Path}, {type, set}, {keypos, 1}]) of
         {ok, _} ->
-            Seq0 = max_seq() + 1,
+            Seq0 = erlang:max(max_seq(), stored_last_seq()) + 1,
             %% Register the sensors we read (idempotent on the Java side).
             lists:foreach(fun(T) -> catch android:sensor_start(T) end, [5, 19, 17]),
             self() ! sample,
@@ -120,12 +125,48 @@ max_seq() ->
                   (_, Acc) -> Acc
                end, 0, ?DETS).
 
+%% High-water mark: keeps Seq monotonic across restarts even when the table
+%% has been fully drained (acked empty), which is the normal steady state.
+stored_last_seq() ->
+    try dets:lookup(?DETS, ?META_LAST_SEQ) of
+        [{_, S}] when is_integer(S) -> S;
+        _ -> 0
+    catch
+        _:_ -> 0
+    end.
+
+persist_last_seq(Seq) ->
+    try
+        dets:insert(?DETS, {?META_LAST_SEQ, Seq}),
+        %% One fsync per sample cycle: dets delays writes in server memory,
+        %% and Android kills app processes abruptly (LMK) — sync so the
+        %% cycle's entries and high-water mark survive that.
+        dets:sync(?DETS)
+    catch _:_ -> ok end.
+
+%% Entry count excluding the {meta, last_seq} bookkeeping record.
+buffered_count() ->
+    case dets:info(?DETS, size) of
+        N when is_integer(N) ->
+            case dets:member(?DETS, ?META_LAST_SEQ) of
+                true -> N - 1;
+                _ -> N
+            end;
+        Other -> Other
+    end.
+
 loop(#{seq := Seq, interval := Interval, max := Max} = St) ->
     receive
         sample ->
             %% Guard the cycle: a transient DETS error must not kill the buffer.
             NewSeq = try sample_all(Seq)
-                     catch C:E -> io:format("[sensor_buffer] sample error ~p:~p~n", [C, E]), Seq end,
+                     catch C:E ->
+                         io:format("[sensor_buffer] sample error ~p:~p~n", [C, E]),
+                         %% A partial cycle may have inserted some entries
+                         %% before the error — never reuse their seqs.
+                         try erlang:max(Seq, max_seq() + 1) catch _:_ -> Seq end
+                     end,
+            if NewSeq > Seq -> persist_last_seq(NewSeq - 1); true -> ok end,
             (catch prune(Max)),
             erlang:send_after(Interval, self(), sample),
             loop(St#{seq := NewSeq});
@@ -133,7 +174,9 @@ loop(#{seq := Seq, interval := Interval, max := Max} = St) ->
         {{fetch_since, Since}, From, Ref} ->
             Reply = try
                         Es = lists:sort(dets:select(?DETS,
-                               [{{'$1', '$2'}, [{'>', '$1', Since}], ['$_']}])),
+                               [{{'$1', '$2'},
+                                 [{is_integer, '$1'}, {'>', '$1', Since}],
+                                 ['$_']}])),
                         Last = case Es of [] -> Since; _ -> element(1, lists:last(Es)) end,
                         {ok, Last, Es}
                     catch C:E -> {error, {C, E}} end,
@@ -142,13 +185,15 @@ loop(#{seq := Seq, interval := Interval, max := Max} = St) ->
 
         {{ack, UpTo}, From, Ref} ->
             Reply = try {ok, dets:select_delete(?DETS,
-                          [{{'$1', '_'}, [{'=<', '$1', UpTo}], [true]}])}
+                          [{{'$1', '_'},
+                            [{is_integer, '$1'}, {'=<', '$1', UpTo}],
+                            [true]}])}
                     catch C:E -> {error, {C, E}} end,
             From ! {Ref, Reply},
             loop(St);
 
         {status, From, Ref} ->
-            From ! {Ref, {ok, #{buffered => dets:info(?DETS, size),
+            From ! {Ref, {ok, #{buffered => buffered_count(),
                                 next_seq => Seq,
                                 interval => Interval,
                                 max => Max}}},
@@ -185,13 +230,20 @@ safe_read(Fun) ->
         _:_ -> skip
     end.
 
-%% Drop the oldest entries when over the cap.
+%% Drop the oldest entries when over the cap. Only integer entry keys are
+%% considered; the meta record is neither counted against the cap nor pruned.
 prune(Max) ->
     case dets:info(?DETS, size) of
         Size when is_integer(Size), Size > Max ->
-            Keys = lists:sort(dets:select(?DETS, [{{'$1', '_'}, [], ['$1']}])),
-            {Old, _} = lists:split(min(Size - Max, length(Keys)), Keys),
-            lists:foreach(fun(K) -> dets:delete(?DETS, K) end, Old);
+            Keys = lists:sort(dets:select(?DETS,
+                     [{{'$1', '_'}, [{is_integer, '$1'}], ['$1']}])),
+            case length(Keys) - Max of
+                N when N > 0 ->
+                    {Old, _} = lists:split(N, Keys),
+                    lists:foreach(fun(K) -> dets:delete(?DETS, K) end, Old);
+                _ ->
+                    ok
+            end;
         _ ->
             ok
     end.

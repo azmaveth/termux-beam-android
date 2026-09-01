@@ -73,8 +73,9 @@ for entry in "${PKGS[@]}"; do
 
     log "Fetching $artifact-$version.$ext"
     if [[ ! -f "$local_file" ]]; then
-        curl -sS -f -L -o "$local_file" "$url" \
-            || die "failed to fetch $url"
+        curl -sS -f -L -o "$local_file.part" "$url" \
+            || { rm -f "$local_file.part"; die "failed to fetch $url"; }
+        mv "$local_file.part" "$local_file"
     fi
 
     if [[ "$ext" == "jar" ]]; then

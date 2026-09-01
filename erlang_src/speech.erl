@@ -68,6 +68,16 @@ transcribe(WavPath) ->
     end.
 
 %% @doc Check speech engine status (which components are loaded).
+%%
+%% KNOWN LIMITATION (deferred 2026-08-31, see IMPROVEMENT_NOTES.md): the
+%% remote branch reports healthy whenever the node is merely reachable.
+%% whereis(asr_health_check) returns 'undefined' when the node is up but
+%% nothing registers that name (nothing does today), and 'undefined' falls
+%% into the catch-all {ok, ...} clause. The 'Elixir.Asr':health fallback is
+%% only tried after {badrpc, _} — i.e. when the node is unreachable — where
+%% a second rpc:call to the same node must also fail, so it can never
+%% succeed. Left as-is deliberately: remote ASR is unused pending a
+%% redesign; fix the health semantics as part of that redesign.
 -spec status() -> {ok, map()} | {error, term()}.
 status() ->
     Mode = asr_mode(),

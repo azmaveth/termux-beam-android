@@ -647,6 +647,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         if (bound) {
+            if (beamService != null) beamService.setOutputCallback(null);
             unbindService(connection);
             bound = false;
         }

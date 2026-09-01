@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class BeamService extends Service {
     private static final String TAG = "BeamService";
@@ -40,6 +41,7 @@ public class BeamService extends Service {
     private Process epmdProcess;
     private OutputStream beamStdin;
     private volatile boolean isBeamRunning = false;
+    private final AtomicBoolean beamStarting = new AtomicBoolean(false);
     private BridgeServer bridgeServer;
 
     public interface OutputCallback {
@@ -80,7 +82,9 @@ public class BeamService extends Service {
     }
 
     public void startBeam() {
-        if (isBeamRunning) return;
+        /* Atomic latch: covers the whole starting-or-running lifetime, so a
+         * second call during asset extraction cannot launch a second VM. */
+        if (!beamStarting.compareAndSet(false, true)) return;
 
         new Thread(new Runnable() {
             @Override
@@ -147,7 +151,7 @@ public class BeamService extends Service {
 
                     if (distributed) {
                         appendOutput("Distribution: " + nodeName + "\n");
-                        appendOutput("Cookie: " + cookie.substring(0, 3) + "***\n");
+                        appendOutput("Cookie: " + cookie.substring(0, Math.min(3, cookie.length())) + "***\n");
                         if (!clusterNodes.isEmpty()) {
                             appendOutput("Cluster: " + clusterNodes + "\n");
                         }
@@ -629,6 +633,8 @@ public class BeamService extends Service {
                     appendOutput("\nError: " + e.getMessage() + "\n");
                     Log.e(TAG, "BEAM launch failed", e);
                     notifyStatus(false);
+                } finally {
+                    beamStarting.set(false);
                 }
             }
         }).start();
@@ -753,22 +759,24 @@ public class BeamService extends Service {
     }
 
     private void appendOutput(final String text) {
-        if (outputCallback != null) {
+        final OutputCallback cb = outputCallback;
+        if (cb != null) {
             handler.post(new Runnable() {
                 @Override
                 public void run() {
-                    outputCallback.onOutput(text);
+                    cb.onOutput(text);
                 }
             });
         }
     }
 
     private void notifyStatus(final boolean running) {
-        if (outputCallback != null) {
+        final OutputCallback cb = outputCallback;
+        if (cb != null) {
             handler.post(new Runnable() {
                 @Override
                 public void run() {
-                    outputCallback.onStatusChanged(running);
+                    cb.onStatusChanged(running);
                 }
             });
         }
