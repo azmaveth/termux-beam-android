@@ -14,6 +14,7 @@ import com.google.ai.edge.litertlm.SessionConfig;
 import java.io.File;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -69,6 +70,91 @@ public class GemmaEngine {
      * @throws RuntimeException if engine initialization fails
      */
     public void load(String modelPath) {
+        load(modelPath, "cpu");
+    }
+
+    /**
+     * "cpu" or "gpu". Thread counts are left to the runtime.
+     *
+     * litertlm 0.14.0 changed this API relative to 0.10.0: Backend.GpuArtisan
+     * was removed outright, and Backend.CPU's single-Integer constructor became
+     * CPU(Integer, Integer), so CPU(null) no longer resolves. Use the no-arg
+     * forms, which exist in both.
+     */
+    private static Backend backendFor(String name) {
+        if ("gpu".equalsIgnoreCase(name)) return new Backend.GPU();
+        return new Backend.CPU();
+    }
+
+    /**
+     * Paths where ARM's Mali userspace blob lives. On this SoC that blob
+     * exports the full OpenCL API (clGetPlatformIDs, clCreateContext,
+     * clEnqueueNDRangeKernel, clBuildProgram, clCommand*KHR, …) even though
+     * the vendor ships no libOpenCL.so anywhere on the device.
+     */
+    private static final String[] MALI_BLOB_PATHS = {
+        "/vendor/lib64/egl/libGLES_mali.so",
+        "/vendor/lib64/libGLES_mali.so",
+        "/system/vendor/lib64/egl/libGLES_mali.so",
+    };
+
+    private static boolean openClPreloadTried = false;
+    private static String openClPreloadResult = "not attempted";
+
+    /**
+     * Pull OpenCL symbols into the process before LiteRT-LM probes for them.
+     *
+     * The GPU backend loads a model fine here but fails at generation with
+     * "Can not find OpenCL library on this device", because it resolves
+     * dlopen("libOpenCL.so") and MediaTek never created that name — the
+     * implementation is inside the Mali GLES blob instead.
+     *
+     * Loading the blob by absolute path only helps if LiteRT falls back to
+     * dlsym(RTLD_DEFAULT, ...) after its own dlopen fails. If it keeps a
+     * private handle this will not be enough, and the fix becomes shipping a
+     * copy named libOpenCL.so in jniLibs (so the app's own lib dir satisfies
+     * the name lookup) or a root symlink at /vendor/lib64/libOpenCL.so.
+     * Cheap to try first; the outcome is reported back in gemma_load's reply
+     * either way, so a failure here is diagnostic rather than silent.
+     */
+    private static synchronized String preloadOpenCL() {
+        if (openClPreloadTried) return openClPreloadResult;
+        openClPreloadTried = true;
+        for (String p : MALI_BLOB_PATHS) {
+            if (!new File(p).exists()) continue;
+            try {
+                System.load(p);
+                openClPreloadResult = "loaded " + p;
+                Log.i(TAG, "OpenCL preload: " + openClPreloadResult);
+                return openClPreloadResult;
+            } catch (Throwable t) {
+                openClPreloadResult = "failed " + p + ": " + t.getMessage();
+                Log.w(TAG, "OpenCL preload: " + openClPreloadResult);
+            }
+        }
+        if ("not attempted".equals(openClPreloadResult)) {
+            openClPreloadResult = "no Mali blob found";
+            Log.w(TAG, "OpenCL preload: " + openClPreloadResult);
+        }
+        return openClPreloadResult;
+    }
+
+    /** Outcome of the last OpenCL preload attempt, for reporting to callers. */
+    public static String openClStatus() {
+        return openClPreloadResult;
+    }
+
+    /**
+     * Load a model on a named backend: "cpu" (default) or "gpu".
+     *
+     * Worth trying GPU: on the reference Android device the vendor benchmarks
+     * put GPU at 0.3 s time-to-first-token and 676 MB, versus 1.8 s and
+     * 1733 MB on CPU. The memory drop matters as much as the speed on a
+     * memory-constrained handset. GPU availability depends on the SoC's
+     * driver, so this stays selectable at call time rather than hardcoded —
+     * if GPU init fails, the caller can retry with "cpu" without a rebuild.
+     */
+    public void load(String modelPath, String backendName) {
         synchronized (lock) {
             File f = new File(modelPath);
             if (!f.exists() || !f.canRead()) {
@@ -87,37 +173,129 @@ public class GemmaEngine {
             Log.i(TAG, "Loading model: " + modelPath);
             long startMs = System.currentTimeMillis();
 
-            /* Text-only on CPU with default thread count. Vision/audio backends
-             * must still be non-null — pass the same CPU instance. We leave
-             * maxNumTokens as null to use the runtime default. */
-            Backend cpu = new Backend.CPU(null);
+            /* Per-modality backends. The model declares constraints per
+             * modality and they are not uniform — with all three on GPU the
+             * engine rejects audio ("Model requires one of [cpu] but Audio
+             * backend is GPU"); with vision on CPU it rejects the vision
+             * encoder ("must have exactly one signature but got 3"). Rather
+             * than guess-and-rebuild, the spec is "text[,vision[,audio]]",
+             * e.g. "gpu", "gpu,gpu,cpu", "cpu". Unspecified slots inherit the
+             * text backend. */
+            /* Spec is "text[,vision[,audio]]". An OMITTED slot is null, not a
+             * copy of the text backend — null means "this model has no such
+             * modality", which is what a text-only bundle needs. Naming an
+             * audio backend for a text-only model makes the runtime look for
+             * an encoder that isn't there:
+             *   NOT_FOUND: TF_LITE_AUDIO_ENCODER_HW not found in the model.
+             *
+             * Only modelPath and the text backend are @NotNull on
+             * EngineConfig; visionBackend, audioBackend, maxNumTokens,
+             * maxNumImages and cacheDir are all @Nullable (verified against
+             * the 0.14.0 class's parameter annotations). The original code
+             * passed one backend instance to all three slots on the assumption
+             * that they were required — they are not.
+             *
+             * So: "cpu" = text-only on CPU; "cpu,cpu,cpu" = full multimodal;
+             * "gpu,gpu,cpu" = GPU text+vision with the CPU audio the model
+             * demands. */
+            String[] parts = backendName.split(",");
+            String textName = parts.length > 0 && !parts[0].trim().isEmpty()
+                ? parts[0].trim() : "cpu";
+
+            /* Any GPU slot means LiteRT will go looking for OpenCL. */
+            if (backendName.toLowerCase(Locale.US).contains("gpu")) {
+                preloadOpenCL();
+            }
+            Backend visionBackend = parts.length > 1 ? backendFor(parts[1].trim()) : null;
+            Backend audioBackend  = parts.length > 2 ? backendFor(parts[2].trim()) : null;
+            Log.i(TAG, "Backends: text=" + textName
+                     + " vision=" + (visionBackend == null ? "none" : parts[1].trim())
+                     + " audio="  + (audioBackend  == null ? "none" : parts[2].trim()));
+            /* litertlm 0.14.0 inserted maxNumImages before cacheDir:
+             *   (modelPath, backend, visionBackend, audioBackend,
+             *    maxNumTokens, maxNumImages, cacheDir)
+             * Must be null or positive — 0 is rejected outright:
+             *   "maxNumImages must be positive or null (use the default from
+             *    model or engine)."
+             * So there is no way to switch the vision encoder off from here;
+             * null takes the model/engine default. */
             EngineConfig config = new EngineConfig(
                 modelPath,
-                cpu,                    // text backend
-                cpu,                    // vision backend (unused for Gemma text)
-                cpu,                    // audio backend (unused)
+                backendFor(textName),   // @NotNull — the only required backend
+                visionBackend,          // null = model has/needs no vision
+                audioBackend,           // null = model has/needs no audio
                 null,                   // maxNumTokens — library default
+                null,                   // maxNumImages — model/engine default
                 cacheDir.getAbsolutePath()
             );
 
-            try {
-                Engine e = new Engine(config);
-                e.initialize();
-                Session s = e.createSession(new SessionConfig());
-                this.engine = e;
-                this.session = s;
-                this.loadedModelPath = modelPath;
-                this.loadedAt = System.currentTimeMillis();
-
-                long elapsedMs = System.currentTimeMillis() - startMs;
-                Log.i(TAG, "Loaded in " + elapsedMs + "ms: " + modelPath);
-            } catch (Throwable t) {
-                /* Best-effort cleanup on partial init. */
-                closeQuietly();
-                throw new RuntimeException(
-                    "LiteRT-LM load failed: " + t.getMessage(), t);
-            }
+            initEngine(config, modelPath, startMs);
         }
+    }
+
+    /** Build the engine + session from a prepared config. Caller holds the lock. */
+    private void initEngine(EngineConfig config, String modelPath, long startMs) {
+        try {
+            Engine e = new Engine(config);
+            e.initialize();
+            Session s = e.createSession(new SessionConfig());
+            this.engine = e;
+            this.session = s;
+            this.loadedModelPath = modelPath;
+            this.loadedAt = System.currentTimeMillis();
+
+            long elapsedMs = System.currentTimeMillis() - startMs;
+            Log.i(TAG, "Loaded in " + elapsedMs + "ms: " + modelPath);
+        } catch (Throwable t) {
+            /* Best-effort cleanup on partial init. */
+            closeQuietly();
+            throw new RuntimeException(
+                "LiteRT-LM load failed: " + t.getMessage(), t);
+        }
+    }
+
+    /**
+     * Wrap a bare prompt in the loaded model's chat template.
+     *
+     * An instruct model emits an immediate end-of-turn for un-templated input,
+     * which is why raw prompts returned {"text":""} while still burning
+     * seconds of compute. LiteRT-LM does not apply the template itself, even
+     * though the bundle embeds one.
+     *
+     * Templates are per-family and share no syntax:
+     *   Gemma 4  — "<|turn>user\n" … "<turn|>\n<|turn>model\n"
+     *              (note: NOT Gemma 2/3's <start_of_turn>; the pipe flips
+     *               sides on the closing marker)
+     *   Granite  — "<|start_of_role|>user<|end_of_role|>" …
+     *              "<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+     *   Qwen3    — ChatML: "<|im_start|>user\n" … "<|im_end|>\n<|im_start|>assistant\n"
+     *              followed by an EMPTY "<think>\n\n</think>\n\n" block.
+     *
+     * That empty think block is not cosmetic. Qwen3 reasons by default and
+     * would spend its entire budget on chain-of-thought before answering —
+     * fatal for a voice turn. Pre-filling a closed think block is what the
+     * upstream template emits for enable_thinking=false.
+     *
+     * Selected from the loaded model's filename, defaulting to Gemma. A prompt
+     * that already carries role markers is passed through untouched, so a
+     * caller can build multi-turn context or use a family we don't know about.
+     */
+    private String applyChatTemplate(String prompt) {
+        if (prompt.contains("<|turn>") || prompt.contains("<|start_of_role|>")
+                || prompt.contains("<|im_start|>")) {
+            return prompt;
+        }
+        String model = loadedModelPath == null
+            ? "" : loadedModelPath.toLowerCase(Locale.US);
+        if (model.contains("granite")) {
+            return "<|start_of_role|>user<|end_of_role|>" + prompt
+                 + "<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>";
+        }
+        if (model.contains("qwen")) {
+            return "<|im_start|>user\n" + prompt
+                 + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+        }
+        return "<|turn>user\n" + prompt + "<turn|>\n<|turn>model\n";
     }
 
     /**
@@ -136,7 +314,7 @@ public class GemmaEngine {
                 }
             }
             List<InputData> inputs = Collections.<InputData>singletonList(
-                new InputData.Text(prompt));
+                new InputData.Text(applyChatTemplate(prompt)));
             try {
                 return s.generateContent(inputs);
             } catch (Throwable t) {
@@ -159,7 +337,7 @@ public class GemmaEngine {
         Session s = acquireSessionForGeneration();
         try {
             List<InputData> inputs = Collections.<InputData>singletonList(
-                new InputData.Text(prompt));
+                new InputData.Text(applyChatTemplate(prompt)));
 
             final CountDownLatch done = new CountDownLatch(1);
             final AtomicReference<Throwable> errorRef = new AtomicReference<Throwable>();

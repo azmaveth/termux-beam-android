@@ -24,7 +24,8 @@ import java.util.Map;
  * Preserves keys that this screen doesn't know about (forward-compatible).
  */
 public class ConfigActivity extends Activity {
-    private static final String CONFIG_PATH = "/sdcard/.beam-config";
+    /* Path resolution lives in BeamService.resolveConfigFile so the editor and
+     * the service can never disagree about which file is in effect. */
 
     private Switch distributedSwitch;
     private EditText nodeNameField;
@@ -121,7 +122,7 @@ public class ConfigActivity extends Activity {
         originalConfig.put("asr_mode", "local");
         originalConfig.put("remote_asr_node", "arbor_gpu2@10.42.42.97");
 
-        File f = new File(CONFIG_PATH);
+        File f = BeamService.resolveConfigFile(this);
         if (f.exists()) {
             try (BufferedReader br = new BufferedReader(new FileReader(f))) {
                 String line;
@@ -218,11 +219,15 @@ public class ConfigActivity extends Activity {
             out.append(k).append("=").append(e.getValue()).append("\n");
         }
 
-        try (FileOutputStream fos = new FileOutputStream(CONFIG_PATH)) {
+        /* Writable resolver, not the read one: on a device without All-files
+         * access the read resolver still points at /sdcard when no config
+         * exists yet, so saving there fails and the edit is lost. */
+        File target = BeamService.resolveWritableConfigFile(this);
+        try (FileOutputStream fos = new FileOutputStream(target)) {
             fos.write(out.toString().getBytes());
             return true;
         } catch (IOException e) {
-            Toast.makeText(this, "Save failed: " + e.getMessage(),
+            Toast.makeText(this, "Save failed (" + target + "): " + e.getMessage(),
                 Toast.LENGTH_LONG).show();
             return false;
         }
