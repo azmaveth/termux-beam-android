@@ -401,6 +401,8 @@ public class BridgeServer {
                 case "memory_info":    result = cmdMemoryInfo(); break;
                 case "screen_brightness": result = cmdScreenBrightness(); break;
                 case "notify":         result = cmdNotify(args); break;
+                case "display":        result = cmdDisplay(args); break;
+                case "display_close":  result = cmdDisplayClose(); break;
                 case "mic_record":     result = cmdMicRecord(args); break;
                 case "mic_stop":       result = cmdMicStop(); break;
                 case "tts":            result = cmdTts(args); break;
@@ -1058,6 +1060,144 @@ public class BridgeServer {
             .build();
         nm.notify((int) System.currentTimeMillis(), notif);
         return "\"ok\"";
+    }
+
+
+    /* ---- Display (full-screen viewer, see DisplayActivity) ---- */
+
+    private String cmdDisplay(String args) {
+        /* args: "<path-or-url>[|title[|loop]]" */
+        String text = unquote(args).trim();
+        if (text.isEmpty()) return "{\"error\":\"usage: display <path-or-url>[|title[|loop]]\"}";
+        String[] parts = text.split("\\|", 3);
+        String src = parts[0].trim();
+        String title = parts.length > 1 ? parts[1].trim() : "";
+        boolean loop = parts.length > 2 && parts[2].trim().equalsIgnoreCase("loop");
+        String path = src;
+        String type = DisplayActivity.detectType(src);
+        try {
+            if (src.startsWith("http://") || src.startsWith("https://")) {
+                String[] dl = displayDownload(src);
+                path = dl[0];
+                type = dl[1];
+            } else if (src.startsWith("file://")) {
+                path = Uri.parse(src).getPath();
+            }
+        } catch (Exception e) {
+            return "{\"shown\":false,\"error\":\"download failed: " + escJson(e.getMessage()) + "\"}";
+        }
+        File f = new File(path);
+        if (!f.canRead()) {
+            return "{\"shown\":false,\"error\":\"cannot read " + escJson(path) + "\"}";
+        }
+
+        Intent intent = new Intent(context, DisplayActivity.class);
+        intent.putExtra(DisplayActivity.EXTRA_PATH, path);
+        intent.putExtra(DisplayActivity.EXTRA_TITLE, title);
+        intent.putExtra(DisplayActivity.EXTRA_TYPE, type);
+        intent.putExtra(DisplayActivity.EXTRA_LOOP, loop);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+
+        long before = DisplayActivity.lastShownAt();
+        String via = "activity";
+        try {
+            context.startActivity(intent);
+        } catch (Exception e) {
+            Log.w(TAG, "display: startActivity failed", e);
+        }
+        if (!waitDisplayShown(before, 3000)) {
+            /* Background activity start was blocked: fall back to a
+             * full-screen-intent notification (launches when screen is off,
+             * otherwise shows a heads-up the user can tap). */
+            via = "notification";
+            displayNotify(intent, title.isEmpty() ? f.getName() : title);
+            waitDisplayShown(before, 3000);
+        }
+        boolean shown = DisplayActivity.lastShownAt() != before;
+        return "{\"shown\":" + shown + ",\"type\":\"" + type + "\",\"via\":\"" + via
+            + "\",\"path\":\"" + escJson(path) + "\"}";
+    }
+
+    private String cmdDisplayClose() {
+        return "{\"closed\":" + DisplayActivity.closeCurrent() + "}";
+    }
+
+    private boolean waitDisplayShown(long before, long timeoutMs) {
+        long end = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < end) {
+            if (DisplayActivity.lastShownAt() != before) return true;
+            try { Thread.sleep(100); } catch (InterruptedException e) { return false; }
+        }
+        return false;
+    }
+
+    private void displayNotify(Intent intent, String title) {
+        android.app.NotificationManager nm =
+            (android.app.NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        android.app.NotificationChannel ch = new android.app.NotificationChannel(
+            "beam_display_channel", "Display", android.app.NotificationManager.IMPORTANCE_HIGH);
+        nm.createNotificationChannel(ch);
+        android.app.PendingIntent pi = android.app.PendingIntent.getActivity(context, 9879, intent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT | android.app.PendingIntent.FLAG_IMMUTABLE);
+        android.app.Notification notif = new android.app.Notification.Builder(context, "beam_display_channel")
+            .setContentTitle(title)
+            .setContentText("Tap to view")
+            .setSmallIcon(android.R.drawable.ic_menu_gallery)
+            .setCategory(android.app.Notification.CATEGORY_REMINDER)
+            .setContentIntent(pi)
+            .setFullScreenIntent(pi, true)
+            .setAutoCancel(true)
+            .build();
+        nm.notify(9879, notif);
+    }
+
+    /** Download a URL into the app cache. Returns {path, type}. */
+    private String[] displayDownload(String url) throws Exception {
+        File dir = new File(context.getCacheDir(), "display");
+        dir.mkdirs();
+        File[] old = dir.listFiles();
+        if (old != null) for (File o : old) {
+            if (System.currentTimeMillis() - o.lastModified() > 24L * 3600 * 1000) o.delete();
+        }
+        java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+        conn.setConnectTimeout(15000);
+        conn.setReadTimeout(60000);
+        conn.setInstanceFollowRedirects(true);
+        conn.setRequestProperty("User-Agent", "BeamApp-display/1.0 (Android)");
+        int code = conn.getResponseCode();
+        if (code >= 400) throw new Exception("HTTP " + code);
+        String ctype = conn.getContentType() != null ? conn.getContentType().toLowerCase(Locale.US) : "";
+        String type = DisplayActivity.detectType(url);
+        if (ctype.startsWith("image/")) type = "image";
+        else if (ctype.startsWith("video/")) type = "video";
+        else if (ctype.startsWith("application/pdf")) type = "pdf";
+        else if (ctype.startsWith("text/html")) type = "html";
+        else if (ctype.startsWith("text/markdown")) type = "markdown";
+        String ext;
+        switch (type) {
+            case "image": ext = ctype.contains("png") ? ".png" : ctype.contains("gif") ? ".gif"
+                              : ctype.contains("webp") ? ".webp" : ".jpg"; break;
+            case "video": ext = ctype.contains("webm") ? ".webm" : ".mp4"; break;
+            case "pdf":   ext = ".pdf"; break;
+            case "html":  ext = ".html"; break;
+            default:      ext = ".txt"; break;
+        }
+        File out = new File(dir, "dl-" + System.currentTimeMillis() + ext);
+        try (java.io.InputStream in = conn.getInputStream();
+             FileOutputStream fos = new FileOutputStream(out)) {
+            byte[] buf = new byte[65536];
+            long total = 0;
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                total += n;
+                if (total > 500L * 1024 * 1024) throw new Exception("file too large");
+                fos.write(buf, 0, n);
+            }
+        } finally {
+            conn.disconnect();
+        }
+        return new String[] { out.getAbsolutePath(), type };
     }
 
     /* ---- Introspection ---- */

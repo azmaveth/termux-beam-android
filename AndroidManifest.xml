@@ -33,6 +33,7 @@
     <uses-permission android:name="android.permission.SEND_SMS" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
@@ -63,6 +64,17 @@
             android:exported="false"
             android:label="Custom Dictionary"
             android:parentActivityName=".ConfigActivity" />
+
+        <activity
+            android:name=".DisplayActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:excludeFromRecents="true"
+            android:taskAffinity="com.example.beamapp.display"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
 
         <service
             android:name=".BeamService"
