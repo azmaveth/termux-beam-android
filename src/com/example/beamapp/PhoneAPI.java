@@ -1028,7 +1028,9 @@ public class PhoneAPI {
             "{\"cmd\":\"sms_send\",\"args\":\"<number> <message>\",\"desc\":\"Send SMS\"}," +
             "{\"cmd\":\"contacts\",\"args\":\"[limit]\",\"desc\":\"List contacts\"}," +
             "{\"cmd\":\"call_log\",\"args\":\"[limit]\",\"desc\":\"Recent call history\"}," +
-            "{\"cmd\":\"notify\",\"args\":\"<title> <text>\",\"desc\":\"Show notification\"}," +
+            "{\"cmd\":\"notify\",\"args\":\"<title>|<text>\",\"desc\":\"Show notification\"}," +
+            "{\"cmd\":\"display\",\"args\":\"<path-or-url>[|title[|loop]]\",\"desc\":\"Show image/video/PDF/HTML/text full screen\"}," +
+            "{\"cmd\":\"display_close\",\"desc\":\"Close the display viewer\"}," +
             "{\"cmd\":\"toast\",\"args\":\"<text>\",\"desc\":\"Show toast message\"}," +
             // Clipboard
             "{\"cmd\":\"clipboard_get\",\"desc\":\"Get clipboard text\"}," +
