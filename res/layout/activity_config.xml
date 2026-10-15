@@ -249,6 +249,22 @@
             android:textSize="11sp"
             android:textColor="#888888" />
 
+        <!-- Bridge token export for Termux -->
+        <Button
+            android:id="@+id/config_export_token"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/config_export_token"
+            android:textSize="12sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/config_export_token_hint"
+            android:textSize="11sp"
+            android:textColor="#888888" />
+
         <!-- Save / Cancel -->
         <LinearLayout
             android:layout_width="match_parent"

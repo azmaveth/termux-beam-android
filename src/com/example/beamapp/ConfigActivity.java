@@ -1,6 +1,9 @@
 package com.example.beamapp;
 
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.os.Bundle;
 import android.text.InputType;
 import android.view.View;
@@ -102,6 +105,14 @@ public class ConfigActivity extends Activity {
                         R.string.config_saved, Toast.LENGTH_LONG).show();
                     finish();
                 }
+            }
+        });
+
+        Button exportTokenButton = findViewById(R.id.config_export_token);
+        exportTokenButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                exportBridgeToken();
             }
         });
 
@@ -242,5 +253,60 @@ public class ConfigActivity extends Activity {
             sb.append(String.format("%02x", b & 0xff));
         }
         return sb.toString();
+    }
+
+    /**
+     * Copy the app-private bridge token (files/bridge_token, written by
+     * BridgeServer) to the clipboard and to a shared file Termux can read.
+     * Termux's ~/bin/bridge-token-sync moves it into ~/.bridge_token and
+     * deletes the shared copy.
+     */
+    private void exportBridgeToken() {
+        String token;
+        try (BufferedReader r = new BufferedReader(
+                new FileReader(new File(getFilesDir(), "bridge_token")))) {
+            token = r.readLine();
+        } catch (IOException e) {
+            Toast.makeText(this, "No bridge token yet - start the BEAM first ("
+                + e.getMessage() + ")", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (token == null || token.trim().isEmpty()) {
+            Toast.makeText(this, "Bridge token is empty - start the BEAM first",
+                Toast.LENGTH_LONG).show();
+            return;
+        }
+        token = token.trim();
+
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("BeamApp bridge token", token));
+
+        String[] targets = {
+            "/sdcard/BeamDisplay/.bridge_token",
+            new File(getExternalFilesDir(null), ".bridge_token").getAbsolutePath()
+        };
+        String written = null;
+        String lastErr = null;
+        for (String path : targets) {
+            File f = new File(path);
+            try {
+                File dir = f.getParentFile();
+                if (dir != null && !dir.isDirectory()) dir.mkdirs();
+                try (FileOutputStream out = new FileOutputStream(f)) {
+                    out.write((token + "\n").getBytes("UTF-8"));
+                }
+                written = path;
+                break;
+            } catch (IOException | RuntimeException e) {
+                lastErr = e.getMessage();
+            }
+        }
+        if (written != null) {
+            Toast.makeText(this, "Token copied to clipboard and written to " + written
+                + "\nRun bridge-token-sync in Termux.", Toast.LENGTH_LONG).show();
+        } else {
+            Toast.makeText(this, "Token copied to clipboard (file write failed: "
+                + lastErr + ")", Toast.LENGTH_LONG).show();
+        }
     }
 }

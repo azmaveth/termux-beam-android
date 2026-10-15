@@ -125,6 +125,8 @@
     <string name="config_saved">Saved. Restart BEAM to apply changes.</string>
     <string name="config_restart_hint">Restart BEAM from the main screen to apply changes.</string>
     <string name="config_err_node_name">Node name must be in name@host format.</string>
+    <string name="config_export_token">Copy bridge token for Termux</string>
+    <string name="config_export_token_hint">Copies the bridge auth token to the clipboard and writes it to /sdcard/BeamDisplay/.bridge_token. In Termux run bridge-token-sync to install it into ~/.bridge_token and delete the shared copy.</string>
     <string name="config_err_cookie_empty">Cookie is required when distributed mode is enabled.</string>
     <string name="accessibility_label">BeamApp Screen Control</string>
     <string name="accessibility_description">Allows BeamApp to read screen content and perform UI actions (tap, type, swipe, navigate) for agent-driven automation.</string>
