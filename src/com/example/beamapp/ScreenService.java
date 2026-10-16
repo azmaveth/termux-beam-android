@@ -11,6 +11,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.Display;
+import android.view.KeyEvent;
+import android.accessibilityservice.AccessibilityServiceInfo;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
@@ -39,10 +41,34 @@ public class ScreenService extends AccessibilityService {
 
     private ServerSocket serverSocket;
     private volatile boolean running = false;
+    private static volatile boolean connected = false;
+
+    static boolean isConnected() { return connected; }
+
+    @Override
+    protected boolean onKeyEvent(KeyEvent event) {
+        try {
+            return PttController.onKeyEvent(this, event);
+        } catch (Exception e) {
+            Log.w(TAG, "PTT key handling failed", e);
+            return false;
+        }
+    }
 
     @Override
     public void onServiceConnected() {
         super.onServiceConnected();
+        PttController.init(this);
+        try {
+            AccessibilityServiceInfo info = getServiceInfo();
+            if (info != null && (info.flags & AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS) == 0) {
+                info.flags |= AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
+                setServiceInfo(info);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Could not enable key event filtering", e);
+        }
+        connected = true;
         startServer();
         Log.i(TAG, "AccessibilityService connected, server on port " + PORT);
     }
@@ -59,6 +85,7 @@ public class ScreenService extends AccessibilityService {
 
     @Override
     public void onDestroy() {
+        connected = false;
         stopServer();
         Log.i(TAG, "AccessibilityService destroyed");
         super.onDestroy();

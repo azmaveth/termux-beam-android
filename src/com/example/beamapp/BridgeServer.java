@@ -403,6 +403,8 @@ public class BridgeServer {
                 case "notify":         result = cmdNotify(args); break;
                 case "display":        result = cmdDisplay(args); break;
                 case "display_close":  result = cmdDisplayClose(); break;
+                case "ptt_status":     result = PttController.statusJson(context); break;
+                case "ptt_set":        result = PttController.set(context, unquote(args)); break;
                 case "mic_record":     result = cmdMicRecord(args); break;
                 case "mic_stop":       result = cmdMicStop(); break;
                 case "tts":            result = cmdTts(args); break;

@@ -249,6 +249,62 @@
             android:textSize="11sp"
             android:textColor="#888888" />
 
+        <!-- Push-to-talk (physical keyboard, e.g. Twiddler) -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/config_ptt_title"
+            android:textStyle="bold" />
+
+        <CheckBox
+            android:id="@+id/config_ptt_enabled"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/config_ptt_enabled" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/config_ptt_key"
+            android:textSize="12sp" />
+
+        <Spinner
+            android:id="@+id/config_ptt_key"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <Button
+            android:id="@+id/config_ptt_capture"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/config_ptt_capture"
+            android:textSize="12sp" />
+
+        <RadioGroup
+            android:id="@+id/config_ptt_mode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+            <RadioButton
+                android:id="@+id/config_ptt_mode_toggle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/config_ptt_mode_toggle" />
+            <RadioButton
+                android:id="@+id/config_ptt_mode_hold"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/config_ptt_mode_hold" />
+        </RadioGroup>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/config_ptt_hint"
+            android:textSize="11sp"
+            android:textColor="#888888" />
+
         <!-- Bridge token export for Termux -->
         <Button
             android:id="@+id/config_export_token"

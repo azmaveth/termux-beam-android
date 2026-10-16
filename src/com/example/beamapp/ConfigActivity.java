@@ -7,7 +7,14 @@ import android.content.Context;
 import android.os.Bundle;
 import android.text.InputType;
 import android.view.View;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.RadioGroup;
+import android.widget.Spinner;
+import android.content.SharedPreferences;
+import android.view.KeyEvent;
 import android.widget.EditText;
 import android.widget.Switch;
 import android.widget.Toast;
@@ -68,6 +75,7 @@ public class ConfigActivity extends Activity {
         });
 
         loadConfig();
+        setupPtt();
 
         cookieShowButton.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -308,5 +316,77 @@ public class ConfigActivity extends Activity {
             Toast.makeText(this, "Token copied to clipboard (file write failed: "
                 + lastErr + ")", Toast.LENGTH_LONG).show();
         }
+    }
+
+    /* ---- Push-to-talk settings (SharedPreferences "ptt", applied live) ---- */
+
+    private boolean pttCapturing = false;
+    private Button pttCaptureButton;
+    private Spinner pttKeySpinner;
+    private final java.util.List<Integer> pttKeyCodes = new java.util.ArrayList<>();
+    private ArrayAdapter<String> pttKeyAdapter;
+
+    private void setupPtt() {
+        final SharedPreferences p = PttController.prefs(this);
+        CheckBox enabled = findViewById(R.id.config_ptt_enabled);
+        enabled.setChecked(p.getBoolean(PttController.K_ENABLED, true));
+        enabled.setOnCheckedChangeListener((b, on) ->
+            p.edit().putBoolean(PttController.K_ENABLED, on).apply());
+
+        pttKeySpinner = findViewById(R.id.config_ptt_key);
+        pttKeyAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item);
+        pttKeyAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        for (int i = 0; i < PttController.KEY_CODES.length; i++) {
+            pttKeyCodes.add(PttController.KEY_CODES[i]);
+            pttKeyAdapter.add(PttController.KEY_LABELS[i]);
+        }
+        pttKeySpinner.setAdapter(pttKeyAdapter);
+        selectPttKey(p.getInt(PttController.K_KEY, PttController.DEFAULT_KEY));
+        pttKeySpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
+                p.edit().putInt(PttController.K_KEY, pttKeyCodes.get(pos)).apply();
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
+
+        pttCaptureButton = findViewById(R.id.config_ptt_capture);
+        pttCaptureButton.setOnClickListener(v -> {
+            pttCapturing = true;
+            pttCaptureButton.setText(R.string.config_ptt_capturing);
+        });
+
+        RadioGroup mode = findViewById(R.id.config_ptt_mode);
+        mode.check(PttController.MODE_HOLD.equals(p.getString(PttController.K_MODE, PttController.MODE_TOGGLE))
+            ? R.id.config_ptt_mode_hold : R.id.config_ptt_mode_toggle);
+        mode.setOnCheckedChangeListener((g, id) -> {
+            p.edit().putString(PttController.K_MODE, id == R.id.config_ptt_mode_hold
+                ? PttController.MODE_HOLD : PttController.MODE_TOGGLE).apply();
+            PttController.resetTalking();
+        });
+    }
+
+    private void selectPttKey(int code) {
+        int idx = pttKeyCodes.indexOf(code);
+        if (idx < 0) {
+            pttKeyCodes.add(code);
+            pttKeyAdapter.add(PttController.keyLabel(code));
+            idx = pttKeyCodes.size() - 1;
+        }
+        pttKeySpinner.setSelection(idx);
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (pttCapturing && event.getAction() == KeyEvent.ACTION_DOWN
+                && event.getKeyCode() != KeyEvent.KEYCODE_BACK) {
+            int code = event.getKeyCode();
+            pttCapturing = false;
+            pttCaptureButton.setText(R.string.config_ptt_capture);
+            PttController.prefs(this).edit().putInt(PttController.K_KEY, code).apply();
+            selectPttKey(code);
+            Toast.makeText(this, "Trigger key: " + PttController.keyLabel(code), Toast.LENGTH_SHORT).show();
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
     }
 }

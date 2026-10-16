@@ -1039,6 +1039,8 @@ public class PhoneAPI {
             "{\"cmd\":\"notify\",\"args\":\"<title>|<text>\",\"desc\":\"Show notification\"}," +
             "{\"cmd\":\"display\",\"args\":\"<path-or-url>[|title[|loop]]\",\"desc\":\"Show image/video/PDF/HTML/text full screen\"}," +
             "{\"cmd\":\"display_close\",\"desc\":\"Close the display viewer\"}," +
+            "{\"cmd\":\"ptt_status\",\"desc\":\"Push-to-talk state (enabled, mode, key, talking, lastError)\"}," +
+            "{\"cmd\":\"ptt_set\",\"args\":\"<enabled|mode|key> <value>\",\"desc\":\"Set push-to-talk option (mode: toggle|hold; key: keycode or name e.g. F12)\"}," +
             "{\"cmd\":\"toast\",\"args\":\"<text>\",\"desc\":\"Show toast message\"}," +
             // Clipboard
             "{\"cmd\":\"clipboard_get\",\"desc\":\"Get clipboard text\"}," +
