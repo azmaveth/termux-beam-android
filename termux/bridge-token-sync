@@ -1,19 +1,25 @@
 #!/data/data/com.termux/files/usr/bin/sh
 # Install the BeamApp bridge token exported via
-# BeamApp > Config > "Copy bridge token for Termux" into ~/.bridge_token,
-# then delete the shared copy.
+# BeamApp > Config > "Set up Termux CLI" into ~/.bridge_token (mode 600),
+# then wipe and delete the shared copy. Also run by termux-cli/install.sh.
+# Usage: bridge-token-sync [path-to-exported-token]
 set -e
 DEST="$HOME/.bridge_token"
 for SRC in "${1:-}" /sdcard/BeamDisplay/.bridge_token \
+           "$HOME/storage/shared/BeamDisplay/.bridge_token" \
+           /storage/emulated/0/BeamDisplay/.bridge_token \
            /sdcard/Android/data/com.example.beamapp/files/.bridge_token; do
   [ -n "$SRC" ] && [ -r "$SRC" ] || continue
   TOKEN=$(head -n1 "$SRC" | tr -d '[:space:]')
   [ -n "$TOKEN" ] || { echo "empty token in $SRC" >&2; exit 1; }
   umask 077
   printf '%s\n' "$TOKEN" > "$DEST.tmp" && chmod 600 "$DEST.tmp" && mv "$DEST.tmp" "$DEST"
-  rm -f "$SRC" || echo "warning: could not delete $SRC" >&2
+  # Never leave the token on shared storage: truncate first in case rm fails.
+  : > "$SRC" 2>/dev/null || true
+  rm -f "$SRC" || echo "warning: could not delete $SRC - delete it by hand" >&2
   echo "bridge token installed to $DEST (shared copy removed)"
   exit 0
 done
-echo "no exported token found. In BeamApp open Config and tap 'Copy bridge token for Termux'." >&2
+echo "no exported token found. In BeamApp open Config and tap 'Set up Termux CLI'" >&2
+echo "(if /sdcard is not readable, run termux-setup-storage first)." >&2
 exit 1

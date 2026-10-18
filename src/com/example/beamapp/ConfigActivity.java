@@ -25,6 +25,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
+import java.io.InputStream;
 import java.security.SecureRandom;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -263,11 +264,20 @@ public class ConfigActivity extends Activity {
         return sb.toString();
     }
 
+    /** Shared-storage folder Termux reads after termux-setup-storage. */
+    private static final String SHARED_DIR = "/sdcard/BeamDisplay";
+    /** APK asset folder staged from the repo's termux/ dir by build.sh. */
+    private static final String CLI_ASSETS = "termux-cli";
+
     /**
-     * Copy the app-private bridge token (files/bridge_token, written by
-     * BridgeServer) to the clipboard and to a shared file Termux can read.
-     * Termux's ~/bin/bridge-token-sync moves it into ~/.bridge_token and
-     * deletes the shared copy.
+     * "Set up Termux CLI": write the app-private bridge token (files/bridge_token,
+     * written by BridgeServer) to SHARED_DIR/.bridge_token and the bundled Termux
+     * CLI scripts (bridge, screen, bridge-token-sync, install.sh) to
+     * SHARED_DIR/termux-cli/, then put a one-line, self-contained install command
+     * on the clipboard. install.sh copies the scripts into ~/bin, puts ~/bin on
+     * PATH, moves the token to ~/.bridge_token and deletes the shared copies.
+     * If the scripts cannot be written, falls back to the old behaviour (token
+     * on the clipboard + shared token file for bridge-token-sync).
      */
     private void exportBridgeToken() {
         String token;
@@ -285,36 +295,71 @@ public class ConfigActivity extends Activity {
             return;
         }
         token = token.trim();
-
         ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("BeamApp bridge token", token));
 
+        /* Preferred: token + scripts in SHARED_DIR, install command on clipboard */
+        String cliErr;
+        try {
+            File shared = new File(SHARED_DIR);
+            File cliDir = new File(shared, CLI_ASSETS);
+            if (!cliDir.isDirectory() && !cliDir.mkdirs()) {
+                throw new IOException("cannot create " + cliDir);
+            }
+            String[] scripts = getAssets().list(CLI_ASSETS);
+            if (scripts == null || scripts.length == 0) {
+                throw new IOException("no " + CLI_ASSETS + " assets in APK");
+            }
+            for (String name : scripts) {
+                try (InputStream in = getAssets().open(CLI_ASSETS + "/" + name);
+                     FileOutputStream out = new FileOutputStream(new File(cliDir, name))) {
+                    byte[] buf = new byte[8192];
+                    int n;
+                    while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                }
+            }
+            if (!new File(cliDir, "install.sh").isFile()) {
+                throw new IOException("install.sh missing from " + CLI_ASSETS + " assets");
+            }
+            writeText(new File(shared, ".bridge_token"), token + "\n");
+
+            String cmd = "sh " + new File(cliDir, "install.sh").getAbsolutePath();
+            if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("BeamApp Termux CLI setup", cmd));
+            Toast.makeText(this, "Copied to clipboard:\n" + cmd
+                + "\nPaste it in Termux to install bridge/screen into ~/bin and the token"
+                + " into ~/.bridge_token (shared copies are deleted).",
+                Toast.LENGTH_LONG).show();
+            return;
+        } catch (IOException | RuntimeException e) {
+            cliErr = e.getMessage();
+        }
+
+        /* Fallback: raw token on clipboard + shared token file */
+        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("BeamApp bridge token", token));
         String[] targets = {
-            "/sdcard/BeamDisplay/.bridge_token",
+            SHARED_DIR + "/.bridge_token",
             new File(getExternalFilesDir(null), ".bridge_token").getAbsolutePath()
         };
         String written = null;
-        String lastErr = null;
         for (String path : targets) {
-            File f = new File(path);
             try {
-                File dir = f.getParentFile();
-                if (dir != null && !dir.isDirectory()) dir.mkdirs();
-                try (FileOutputStream out = new FileOutputStream(f)) {
-                    out.write((token + "\n").getBytes("UTF-8"));
-                }
+                writeText(new File(path), token + "\n");
                 written = path;
                 break;
             } catch (IOException | RuntimeException e) {
-                lastErr = e.getMessage();
+                /* try next */
             }
         }
-        if (written != null) {
-            Toast.makeText(this, "Token copied to clipboard and written to " + written
-                + "\nRun bridge-token-sync in Termux.", Toast.LENGTH_LONG).show();
-        } else {
-            Toast.makeText(this, "Token copied to clipboard (file write failed: "
-                + lastErr + ")", Toast.LENGTH_LONG).show();
+        Toast.makeText(this, "CLI export failed (" + cliErr + "). Token copied to clipboard"
+            + (written != null ? " and written to " + written + "; run bridge-token-sync in Termux."
+                               : "; file write failed too."),
+            Toast.LENGTH_LONG).show();
+    }
+
+    private static void writeText(File f, String text) throws IOException {
+        File dir = f.getParentFile();
+        if (dir != null && !dir.isDirectory()) dir.mkdirs();
+        try (FileOutputStream out = new FileOutputStream(f)) {
+            out.write(text.getBytes("UTF-8"));
         }
     }
 

@@ -133,8 +133,8 @@
     <string name="config_ptt_mode_toggle">Tap to toggle</string>
     <string name="config_ptt_mode_hold">Hold to talk</string>
     <string name="config_ptt_hint">A physical keyboard key (e.g. a Twiddler chord sending F12) taps the mic in Grok Bot. Needs BeamApp accessibility enabled. Applies immediately.</string>
-    <string name="config_export_token">Copy bridge token for Termux</string>
-    <string name="config_export_token_hint">Copies the bridge auth token to the clipboard and writes it to /sdcard/BeamDisplay/.bridge_token. In Termux run bridge-token-sync to install it into ~/.bridge_token and delete the shared copy.</string>
+    <string name="config_export_token">Set up Termux CLI (token + commands)</string>
+    <string name="config_export_token_hint">Writes the bridge token and the bridge, screen and bridge-token-sync commands to /sdcard/BeamDisplay and copies a one-line install command (sh /sdcard/BeamDisplay/termux-cli/install.sh) to the clipboard. Paste it in Termux: it installs the commands into ~/bin, adds ~/bin to PATH, moves the token to ~/.bridge_token and deletes the shared copies. Run termux-setup-storage once first if Termux cannot read /sdcard.</string>
     <string name="config_err_cookie_empty">Cookie is required when distributed mode is enabled.</string>
     <string name="accessibility_label">BeamApp Screen Control</string>
     <string name="accessibility_description">Allows BeamApp to read screen content and perform UI actions (tap, type, swipe, navigate) for agent-driven automation.</string>

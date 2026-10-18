@@ -1,0 +1,13 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""screen — print visible text/desc/id nodes from bridge screen_read, with tap centers."""
+import json, subprocess, os
+raw = subprocess.run([os.path.expanduser('~/bin/bridge'), 'screen_read'], capture_output=True, text=True).stdout
+def walk(n, d=0):
+    t = n.get('text') or n.get('desc') or ''
+    b = n.get('bounds', [0, 0, 0, 0])
+    flags = ''.join(k[0].upper() for k in ('click', 'scroll', 'checked') if n.get(k))
+    if t or flags:
+        # bounds look like [x, y, w, h]
+        print(f"{'  '*min(d,6)}[{b[0]+b[2]//2},{b[1]+b[3]//2}] {flags:3} {n.get('id','')} {t!r}")
+    for c in n.get('children', []): walk(c, d+1)
+walk(json.loads(raw))

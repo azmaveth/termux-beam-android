@@ -187,6 +187,15 @@ mkdir -p "$GEN" "$OBJ" "$APK_DIR" "$COMPILED_RES"
 echo "=== Step 1: Compile resources ==="
 "$AAPT2" compile --dir "$PROJECT/res" -o "$COMPILED_RES/"
 
+# Stage the Termux CLI (termux/ in the repo) as APK assets for ConfigActivity's
+# "Set up Termux CLI" button. Regenerated every build; assets/ is gitignored.
+CLI_ASSETS="$PROJECT/assets/termux-cli"
+rm -rf "$CLI_ASSETS"
+mkdir -p "$CLI_ASSETS"
+for f in bridge screen bridge-token-sync install.sh; do
+    cp "$PROJECT/termux/$f" "$CLI_ASSETS/$f"
+done
+
 echo "=== Step 2: Link resources ==="
 "$AAPT2" link \
     -I "$ANDROID_JAR" \

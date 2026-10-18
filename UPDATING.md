@@ -94,7 +94,31 @@ from Termux's Elixir install (`$PREFIX/opt/elixir/lib`, or wherever
 `elixir -e 'IO.puts :code.lib_dir(:elixir)'` points; override with `ELIXIR_LIB=...`)
 into `assets/erlang/lib/<app>-<vsn>/`, removing older versions first.
 
-## How the NIFs Are Loaded
+## Termux CLI (bridge commands)
+
+The Termux-side commands live in `termux/`: `bridge` (call a bridge command on
+port 9877), `screen` (readable dump of `screen_read`), `bridge-token-sync`
+(install an exported token) and `install.sh`. `build.sh` stages them into the APK
+as `assets/termux-cli/` on every build, so edit them in `termux/`, not in
+`assets/`.
+
+To set up Termux on a phone (BraX3, S22, ...): start the BEAM, open BeamApp >
+Config and tap **Set up Termux CLI (token + commands)**. The app writes the token
+to `/sdcard/BeamDisplay/.bridge_token` and the scripts to
+`/sdcard/BeamDisplay/termux-cli/`, and copies this to the clipboard:
+
+```sh
+sh /sdcard/BeamDisplay/termux-cli/install.sh
+```
+
+Paste it in Termux (run `termux-setup-storage` once first if `/sdcard` is denied).
+It needs nothing pre-installed. It copies the scripts into `~/bin` (chmod 755),
+adds `~/bin` to `PATH` in `~/.bashrc` and in `~/.zshrc` if zsh is used (skipped
+when already present), moves the token to `~/.bridge_token` (chmod 600), and wipes
+and deletes the token and scripts from shared storage. It then runs `bridge ping`.
+`bridge` and `screen` need `python3` (`pkg install python`). After the token
+changes (e.g. app reinstall), tap the button again and re-run the command.
+
 
 `crypto` and `asn1` NIFs (`crypto.so`, `crypto_callback.so`, `asn1rt_nif.so`) are
 copied by `prepare_assets.sh` into the asset tree at `lib/<app>-<vsn>/priv/lib/`.

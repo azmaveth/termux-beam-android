@@ -1,0 +1,15 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""bridge CMD [ARGS...] — call a BeamApp bridge command (port 9877).
+ARGS are joined with spaces and sent as the "args" string."""
+import json, os, socket, sys
+tok = open(os.path.expanduser('~/.bridge_token')).read().strip()
+cmd, args = sys.argv[1], " ".join(sys.argv[2:])
+s = socket.create_connection(('127.0.0.1', 9877), timeout=float(os.environ.get('BRIDGE_TIMEOUT', 60)))
+f = s.makefile('rw')
+f.write(json.dumps({"id": 0, "cmd": "auth", "args": tok}) + "\n"); f.flush()
+if not json.loads(f.readline()).get("ok"): sys.exit("bridge auth failed")
+f.write(json.dumps({"id": 1, "cmd": cmd, "args": args}) + "\n"); f.flush()
+r = json.loads(f.readline())
+d = r.get("data") if r.get("ok") else r.get("error")
+print(d if isinstance(d, str) else json.dumps(d, indent=1))
+sys.exit(0 if r.get("ok") else 1)
