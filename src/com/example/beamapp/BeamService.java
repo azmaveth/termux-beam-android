@@ -547,16 +547,20 @@ public class BeamService extends Service {
                     /* Code paths for OTP apps */
                     String libBase = erlRoot.getAbsolutePath() + "/lib";
                     String androidEbin = libBase + "/android/ebin";
-                    String cryptoEbin = libBase + "/crypto-5.8/ebin";
-                    String asn1Ebin = libBase + "/asn1-5.4.2/ebin";
-                    String publicKeyEbin = libBase + "/public_key-1.20.1/ebin";
-                    String sslEbin = libBase + "/ssl-11.5.1/ebin";
+                    /* OTP crypto/ssl stack + Elixir core: versions come from
+                     * whatever prepare_assets.sh bundled (detected from the APK's
+                     * assets, not the extracted dir, which may hold stale
+                     * versions from an older install). */
+                    String cryptoEbin = libBase + "/" + bundledLibDir("crypto") + "/ebin";
+                    String asn1Ebin = libBase + "/" + bundledLibDir("asn1") + "/ebin";
+                    String publicKeyEbin = libBase + "/" + bundledLibDir("public_key") + "/ebin";
+                    String sslEbin = libBase + "/" + bundledLibDir("ssl") + "/ebin";
 
                     /* Elixir runtime code paths */
-                    String elixirEbin = libBase + "/elixir-1.19.5/ebin";
-                    String loggerEbin = libBase + "/logger-1.19.5/ebin";
-                    String iexEbin = libBase + "/iex-1.19.5/ebin";
-                    String eexEbin = libBase + "/eex-1.19.5/ebin";
+                    String elixirEbin = libBase + "/" + bundledLibDir("elixir") + "/ebin";
+                    String loggerEbin = libBase + "/" + bundledLibDir("logger") + "/ebin";
+                    String iexEbin = libBase + "/" + bundledLibDir("iex") + "/ebin";
+                    String eexEbin = libBase + "/" + bundledLibDir("eex") + "/ebin";
                     String jasonEbin = libBase + "/jason-1.4.4/ebin";
                     String telemetryEbin = libBase + "/telemetry-1.4.0/ebin";
                     String decimalEbin = libBase + "/decimal-2.3.0/ebin";
@@ -782,6 +786,58 @@ public class BeamService extends Service {
             Log.w(TAG, "epmd start failed: " + e.getMessage());
             appendOutput("Warning: epmd start failed: " + e.getMessage() + "\n");
         }
+    }
+
+    /**
+     * Name of the bundled "<app>-<vsn>" dir under assets/erlang/lib, e.g.
+     * "crypto-5.10". prepare_assets.sh removes old versions before copying, so
+     * there is normally exactly one; if several are present the highest
+     * version wins.
+     */
+    private String bundledLibDir(String app) {
+        String best = null;
+        try {
+            String[] dirs = getAssets().list("erlang/lib");
+            if (dirs != null) {
+                String prefix = app + "-";
+                for (String d : dirs) {
+                    if (!d.startsWith(prefix)) continue;
+                    String vsn = d.substring(prefix.length());
+                    if (vsn.isEmpty() || !Character.isDigit(vsn.charAt(0))) continue;
+                    if (best == null || compareVersions(vsn, best.substring(prefix.length())) > 0) {
+                        best = d;
+                    }
+                }
+            }
+        } catch (IOException e) {
+            Log.w(TAG, "Could not list erlang/lib assets", e);
+        }
+        if (best == null) {
+            Log.w(TAG, "No bundled " + app + "-* dir in assets/erlang/lib");
+            appendOutput("Warning: no bundled " + app + " library found\n");
+            return app;
+        }
+        return best;
+    }
+
+    private static int compareVersions(String a, String b) {
+        String[] pa = a.split("[.-]");
+        String[] pb = b.split("[.-]");
+        for (int i = 0; i < Math.max(pa.length, pb.length); i++) {
+            int na = i < pa.length ? leadingInt(pa[i]) : 0;
+            int nb = i < pb.length ? leadingInt(pb[i]) : 0;
+            if (na != nb) return Integer.compare(na, nb);
+        }
+        return 0;
+    }
+
+    private static int leadingInt(String s) {
+        int n = 0;
+        for (int i = 0; i < s.length() && Character.isDigit(s.charAt(i)); i++) {
+            n = n * 10 + (s.charAt(i) - '0');
+            if (n > 1000000) break;
+        }
+        return n;
     }
 
     private void createSymlink(String target, String link) {

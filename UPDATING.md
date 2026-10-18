@@ -10,8 +10,9 @@ The BeamApp APK ships its own self-contained BEAM environment:
 | Component | Source | How it gets in |
 |---|---|---|
 | ERTS (`beam.smp`, `erlexec`, ...) | Termux `pkg install erlang` | `prepare_assets.sh` copies from `/data/data/com.termux/files/usr/lib/erlang/erts-*` |
-| OTP libs (kernel, stdlib, compiler) | Same | Same |
-| Elixir + hex deps (`ecto`, `exqlite`, ...) | Built via a temporary mix project | `update_elixir_deps.sh` |
+| OTP libs (kernel, stdlib, compiler, asn1, crypto, public_key, ssl) | Same | Same (crypto/asn1 NIFs copied into `priv/lib/`) |
+| Elixir core (`elixir`, `eex`, `iex`, `logger`) | Termux `pkg install elixir` | `prepare_assets.sh` copies from Termux's Elixir lib dir into `<app>-<vsn>/` |
+| Hex deps (`ecto`, `exqlite`, ...) | Built via a temporary mix project | `update_elixir_deps.sh` |
 | `sqlite3_nif.so` | Built by `mix deps.compile exqlite` | `update_elixir_deps.sh` copies to `build/lib/arm64-v8a/libsqlite3_nif.so`; `BeamService.java` symlinks it into `lib/exqlite-<ver>/priv/sqlite3_nif.so` at boot |
 | Custom Erlang modules (`android.erl`, `speech.erl`) | This repo | Compiled by `prepare_assets.sh` |
 | LiteRT-LM (Gemma 4 runtime) + Kotlin stdlib/coroutines/gson | Google Maven + Maven Central | `download_litertlm.sh` fetches AARs/JARs, stages `classes.jar`s into `build/litertlm/classpath/` and `liblitertlm_jni.so` into `build/lib/arm64-v8a/` |
@@ -22,9 +23,25 @@ cross-compile needed.
 
 ## Source of Truth for Versions
 
-- **OTP / ERTS** — whatever Termux currently has installed. `prepare_assets.sh` now
-  auto-detects the version dirs (`erts-*`, `lib/kernel-*`, etc.), so there is nothing
-  to edit when OTP upgrades.
+- **OTP / ERTS / Elixir** — whatever Termux currently has installed. `prepare_assets.sh`
+  auto-detects the version dirs (`erts-*`, `lib/kernel-*`, `lib/crypto-*`, etc.) and
+  reads the Elixir version from `elixir.app`, so there is nothing to edit when OTP or
+  Elixir upgrades. `BeamService.java` finds the bundled `crypto-*`, `ssl-*`,
+  `elixir-*`, ... dirs from the APK's assets at boot, so it needs no edits either.
+
+## What is (and isn't) tracked in git
+
+Everything `prepare_assets.sh` generates is **not** committed — `assets/` and
+`build/` are gitignored and the generated output was untracked. Run
+`./prepare_assets.sh` after cloning (and after any `pkg upgrade erlang elixir`)
+before `./build.sh`. Generated: ERTS binaries and dependent `.so`s in
+`build/lib/arm64-v8a/` (including `libepmd.so`), `assets/erlang/bin/*.boot`,
+`assets/erlang/erts_version`, `assets/erlang/lib/{kernel,stdlib,compiler,asn1,crypto,public_key,ssl}-*`,
+`assets/erlang/lib/{elixir,eex,iex,logger}-*`, `assets/erlang/lib/android`, and the
+model dirs.
+
+Still tracked (force-added): the hex deps under `assets/erlang/lib/` and
+`build/lib/arm64-v8a/libsqlite3_nif.so`, which `update_elixir_deps.sh` manages.
 - **Hex deps** — the `DEPS` array near the top of `update_elixir_deps.sh`. Bump
   versions there.
 - **LiteRT-LM / Kotlin deps** — the `PKGS` array near the top of
@@ -37,7 +54,7 @@ cross-compile needed.
 ```bash
 pkg upgrade erlang elixir
 ./update_elixir_deps.sh   # rebuild deps against the new OTP/Elixir
-./prepare_assets.sh       # picks up new ERTS/kernel/stdlib/compiler automatically
+./prepare_assets.sh       # picks up new ERTS/OTP libs/Elixir automatically
 ./build.sh                # rebuild APK
 ```
 
@@ -72,13 +89,21 @@ pkg upgrade elixir
 ./build.sh
 ```
 
-Note: `prepare_assets.sh` does **not** currently copy Elixir's own BEAM files
-(`elixir-*`, `eex-*`, `iex-*`, `logger-*`) — those were copied in by hand during
-the original Elixir bring-up commit. If Elixir is upgraded substantially, you may
-also need to refresh those by copying from `/data/data/com.termux/files/usr/lib/elixir/lib/`
-(this is a TODO — see "Limitations" below).
+`prepare_assets.sh` copies Elixir's own BEAM files (`elixir`, `eex`, `iex`, `logger`)
+from Termux's Elixir install (`$PREFIX/opt/elixir/lib`, or wherever
+`elixir -e 'IO.puts :code.lib_dir(:elixir)'` points; override with `ELIXIR_LIB=...`)
+into `assets/erlang/lib/<app>-<vsn>/`, removing older versions first.
 
-## How the NIF Symlink Works
+## How the NIFs Are Loaded
+
+`crypto` and `asn1` NIFs (`crypto.so`, `crypto_callback.so`, `asn1rt_nif.so`) are
+copied by `prepare_assets.sh` into the asset tree at `lib/<app>-<vsn>/priv/lib/`.
+`BeamService.java` extracts the whole `erlang` asset tree into the app's files dir
+at boot, and the apps load their NIFs from `priv/lib` the normal way. Their OpenSSL
+dependency is bundled as `build/lib/arm64-v8a/libcrypto3.so`/`libssl3.so` and
+symlinked to `libcrypto.so.3`/`libssl.so.3` at boot.
+
+### exqlite
 
 `exqlite` ships a NIF (`sqlite3_nif.so`) that needs to be loaded from the
 package's `priv/` directory. But Android only extracts files placed in `lib/<abi>/`
@@ -122,12 +147,9 @@ Then rebuild and install:
 
 ## Limitations / TODOs
 
-- **Elixir core libs are not auto-refreshed.** `elixir-*`, `eex-*`, `iex-*`,
-  `logger-*` were committed by hand during the initial Elixir bring-up and are not
-  re-staged by either script. For minor patch bumps of Elixir this doesn't matter,
-  but a major version change would need them refreshed.
-- **`asn1`, `crypto`, `ssl`, `public_key` OTP apps** are committed in `assets/erlang/lib/`
-  but also not refreshed by `prepare_assets.sh`. Same caveat.
+- **Hex deps must be rebuilt after an OTP/Elixir upgrade.** `prepare_assets.sh`
+  refreshes OTP and Elixir core, but the hex deps under `assets/erlang/lib/` only
+  change when `update_elixir_deps.sh` is run.
 - **Cluster setup scripts** (`cluster/`) are unrelated and don't need updating.
 
 ### Update LiteRT-LM or its Kotlin deps
@@ -165,7 +187,8 @@ See Gallery's `LlmChatModelHelper.kt` for a reference implementation to port.
 ### Safety note
 
 `prepare_assets.sh` only cleans the directories it manages (`kernel-*`, `stdlib-*`,
-`compiler-*`, `android`, `bin`, `erts_version`) and the model dirs. It will **not**
+`compiler-*`, `asn1-*`, `crypto-*`, `public_key-*`, `ssl-*`, `elixir-*`, `eex-*`,
+`iex-*`, `logger-*`, `android`, `erts_version`) and the model dirs. It will **not**
 touch hex dep dirs or `libsqlite3_nif.so`. The two scripts can be run in either
 order, but the recommended order is `update_elixir_deps.sh` first, then
 `prepare_assets.sh`, since the latter is faster to re-run if you need to iterate.
